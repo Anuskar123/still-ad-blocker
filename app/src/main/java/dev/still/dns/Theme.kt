@@ -30,10 +30,14 @@ private val StillTypography = Typography(
 )
 
 @Composable
-fun StillTheme(content: @Composable () -> Unit) {
-    val dark = isSystemInDarkTheme()
+fun StillTheme(settings: AppSettings = AppSettings(), content: @Composable () -> Unit) {
+    val dark = when (settings.appearance) {
+        Appearance.System -> isSystemInDarkTheme()
+        Appearance.Light -> false
+        Appearance.Dark -> true
+    }
     val context = LocalContext.current
-    val colors = if (Build.VERSION.SDK_INT >= 31) {
+    val colors = if (settings.dynamicColors && Build.VERSION.SDK_INT >= 31) {
         if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
     } else if (dark) DarkColors else LightColors
     MaterialTheme(colorScheme = colors, typography = StillTypography, content = content)

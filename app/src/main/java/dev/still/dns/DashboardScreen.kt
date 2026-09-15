@@ -5,6 +5,7 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -34,7 +35,17 @@ import java.text.NumberFormat
 import java.util.Locale
 
 @Composable
-fun DashboardScreen(state: ProtectionState, onToggle: () -> Unit, onDismissError: () -> Unit) {
+fun DashboardScreen(
+    state: ProtectionState, onToggle: () -> Unit, onDismissError: () -> Unit,
+    preferences: AppSettings = AppSettings(),
+    onSettingsChange: (AppSettings) -> Unit = {},
+    onResetStatistics: () -> Unit = {},
+    onClearHistory: () -> Unit = {},
+    filterLibrary: FilterLibraryState = FilterLibraryState(),
+    onUpdateFilters: () -> Unit = {},
+    onOpenPrivateBrowser: () -> Unit = {},
+    onOpenOtherBrowser: () -> Unit = {}
+) {
     var settings by rememberSaveable { mutableStateOf(false) }
     val colors = MaterialTheme.colorScheme
     Scaffold(containerColor = colors.background) { insets ->
@@ -58,15 +69,23 @@ fun DashboardScreen(state: ProtectionState, onToggle: () -> Unit, onDismissError
                     Text(if (state.connected) "A quieter internet." else "Your space, protected.", style = MaterialTheme.typography.displaySmall)
                     Text("Keep known ad domains out of your day.", color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
                 }
+                BrowseCard(state.connected, onOpenPrivateBrowser, onOpenOtherBrowser)
                 Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                     PowerButton(state, onToggle)
+                    OutlinedButton(onClick = onToggle) {
+                        Text(when (state.connection) {
+                            Connection.Connected -> "Turn off protection"
+                            Connection.Connecting -> "Cancel connection"
+                            Connection.Disconnected -> "Turn on protection"
+                        })
+                    }
                     Text(when (state.connection) {
                         Connection.Connected -> "Protection is on"
                         Connection.Connecting -> "Starting protection"
                         Connection.Disconnected -> "Tap to Protect"
                     }, style = MaterialTheme.typography.titleLarge)
                     Spacer(Modifier.height(8.dp))
-                    Text(if (state.connected) "DNS filtering is active on this device" else "One tap for a little more peace of mind", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant, textAlign = TextAlign.Center)
+                    Text(if (state.connected) "DNS filtering is active. Tap to turn it off." else "Control DNS filtering with the button above.", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant, textAlign = TextAlign.Center)
                 }
                 if (state.error != null) {
                     Card(colors = CardDefaults.cardColors(containerColor = colors.errorContainer)) {
@@ -82,7 +101,7 @@ fun DashboardScreen(state: ProtectionState, onToggle: () -> Unit, onDismissError
                         Text("THIS APP SESSION", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        StatCard("Ads Blocked", NumberFormat.getIntegerInstance().format(state.blocked), "DNS requests stopped", Icons.Outlined.GppGood, Modifier.weight(1f))
+                        StatCard("Blocked requests", NumberFormat.getIntegerInstance().format(state.blocked), "DNS requests stopped", Icons.Outlined.GppGood, Modifier.weight(1f))
                         StatCard("Data Saved", String.format(Locale.getDefault(), "%.2f MB", state.savedMb), "Estimated, 50 KB / block", Icons.Outlined.DataUsage, Modifier.weight(1f))
                     }
                     ElevatedCard(shape = RoundedCornerShape(24.dp), colors = CardDefaults.elevatedCardColors(containerColor = colors.surface)) {
@@ -91,7 +110,7 @@ fun DashboardScreen(state: ProtectionState, onToggle: () -> Unit, onDismissError
                             Spacer(Modifier.width(14.dp))
                             Column(Modifier.weight(1f)) {
                                 Text("Status", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-                                Text(if (state.connected) "Secure" else "Unprotected", style = MaterialTheme.typography.titleMedium)
+                                Text(if (state.connected) "Filtering active" else "Protection off", style = MaterialTheme.typography.titleMedium)
                             }
                             Box(Modifier.size(8.dp).background(if (state.connected) colors.primary else colors.outline, CircleShape))
                             Spacer(Modifier.width(8.dp))
@@ -99,12 +118,14 @@ fun DashboardScreen(state: ProtectionState, onToggle: () -> Unit, onDismissError
                         }
                     }
                 }
+                ProtectionControls(state, preferences, onSettingsChange, onClearHistory)
+                FilterListsCard(filterLibrary, preferences, onSettingsChange, onUpdateFilters)
                 HorizontalDivider(color = colors.outlineVariant)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Icon(Icons.Outlined.Lock, null, tint = colors.onSurfaceVariant, modifier = Modifier.size(18.dp))
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("Local protection. No account needed.", style = MaterialTheme.typography.labelLarge)
-                        Text("Domains are checked on-device. Allowed DNS queries go to Google DNS. Browsing traffic is not encrypted by Still.", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        Text("Domains are checked on-device. Allowed DNS queries go to ${preferences.dnsProvider.name}. Browsing traffic is not encrypted by Still.", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                     }
                 }
                 Text("${NumberFormat.getIntegerInstance().format(state.queries)} queries checked  /  ${state.failures} upstream failures", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
@@ -116,11 +137,37 @@ fun DashboardScreen(state: ProtectionState, onToggle: () -> Unit, onDismissError
             title = { Text("Protection settings") },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Text("Appearance follows your device, including dynamic colors on Android 12 and later.")
-                    Text("DNS resolver\nGoogle DNS · 8.8.8.8", fontWeight = FontWeight.Medium)
-                    Text("Built-in blocklist\n" + AdBlockerService.BLOCKLIST.sorted().joinToString("\n"))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Protection", modifier = Modifier.weight(1f))
+                        Switch(checked = state.connection != Connection.Disconnected, onCheckedChange = { onToggle() }, modifier = Modifier.semantics { contentDescription = "Protection" })
+                    }
+                    Text("Appearance", fontWeight = FontWeight.Medium)
+                    Appearance.entries.forEach { appearance ->
+                        Row(Modifier.fillMaxWidth().selectable(selected = preferences.appearance == appearance, role = Role.RadioButton, onClick = { onSettingsChange(preferences.copy(appearance = appearance)) }), verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(selected = preferences.appearance == appearance, onClick = null)
+                            Text(appearance.name)
+                        }
+                    }
+                    if (android.os.Build.VERSION.SDK_INT >= 31) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Use device colors", modifier = Modifier.weight(1f))
+                            Switch(checked = preferences.dynamicColors, onCheckedChange = { onSettingsChange(preferences.copy(dynamicColors = it)) }, modifier = Modifier.semantics { contentDescription = "Use device colors" })
+                        }
+                    }
+                    Text("DNS resolver", fontWeight = FontWeight.Medium)
+                    Text("Turn protection off to change the resolver. DNS queries are sent unencrypted.")
+                    DnsProvider.entries.forEach { provider ->
+                        val enabled = state.connection == Connection.Disconnected
+                        Row(Modifier.fillMaxWidth().selectable(selected = preferences.dnsProvider == provider, enabled = enabled, role = Role.RadioButton, onClick = { onSettingsChange(preferences.copy(dnsProvider = provider)) }), verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(selected = preferences.dnsProvider == provider, onClick = null, enabled = enabled)
+                            Text("${provider.name} (${provider.address})")
+                        }
+                    }
+                    TextButton(onClick = onResetStatistics) { Text("Reset session statistics") }
+                    Text("${preferences.protectionLevel.title} built-in blocklist\n" + FilterPolicy.rules(preferences.protectionLevel).sorted().joinToString("\n"))
                     Text("Subdomains are included. Counters last until the app process ends. Data savings are an estimate, not measured traffic.")
-                    Text("This version filters IPv4 UDP DNS only. Private DNS, encrypted DNS, cached answers and app-specific resolvers may bypass filtering. TCP DNS fallback is not supported. Another VPN cannot run alongside Still.")
+                    Text("These are small starter lists, not a malware database or a complete ad blocker. DNS filtering cannot reliably remove ads served from the same domains as content, including YouTube video ads.")
+                    Text("This version filters IPv4 UDP DNS only. Private DNS, encrypted DNS, cached answers and app-specific resolvers may bypass filtering. Upstream TCP fallback is supported. Another VPN cannot run alongside Still.")
                 }
             }, confirmButton = { TextButton(onClick = { settings = false }) { Text("Done") } })
     }
@@ -142,8 +189,12 @@ private fun PowerButton(state: ProtectionState, onToggle: () -> Unit) {
         }
         Box(Modifier.size(204.dp).border(1.dp, colors.outlineVariant.copy(alpha = 0.5f), CircleShape), contentAlignment = Alignment.Center) {
             Box(Modifier.size(176.dp).clip(CircleShape).background(Brush.linearGradient(listOf(start, end)))
-                .semantics { contentDescription = if (state.connected) "Disconnect DNS protection" else "Connect DNS protection" }
-                .clickable(enabled = state.connection != Connection.Connecting, role = Role.Button, onClick = onToggle), contentAlignment = Alignment.Center) {
+                .semantics { contentDescription = when (state.connection) {
+                    Connection.Connected -> "Disconnect DNS protection"
+                    Connection.Connecting -> "Cancel DNS connection"
+                    Connection.Disconnected -> "Connect DNS protection"
+                } }
+                .clickable(role = Role.Button, onClick = onToggle), contentAlignment = Alignment.Center) {
                 if (state.connection == Connection.Connecting) CircularProgressIndicator(modifier = Modifier.size(48.dp))
                 else Icon(Icons.Outlined.PowerSettingsNew, null, modifier = Modifier.size(64.dp), tint = if (state.connected) Color(0xFF123B36) else colors.onSurfaceVariant)
             }

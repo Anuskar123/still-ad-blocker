@@ -10,37 +10,58 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.system.OsConstants
-import java.io.FileInputStream
-import java.io.FileOutputStream
+import android.system.Os
+import android.system.ErrnoException
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
+import kotlinx.coroutines.*
 
 class AdBlockerService : VpnService() {
     companion object {
         const val STOP = "dev.still.dns.STOP"
-        val BLOCKLIST = setOf("ads.google.com", "doubleclick.net", "googlesyndication.com", "googleadservices.com")
+        const val RELOAD = "dev.still.dns.RELOAD"
+        val BLOCKLIST = FilterPolicy.ads
     }
     private var session: Session? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var startup: Job? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == STOP) { stopProtection(); return START_NOT_STICKY }
-        if (session != null) return START_NOT_STICKY
+        if (intent?.action == RELOAD) {
+            session?.reloadSettings()
+            if (session == null && startup?.isActive != true) stopSelf()
+            return START_NOT_STICKY
+        }
+        if (session != null || startup?.isActive == true) return START_NOT_STICKY
         ProtectionStore.update { it.copy(connection = Connection.Connecting, error = null) }
         try {
             foreground()
+            startup = serviceScope.launch {
+              try {
+                // Load validated cached filters on an I/O worker before capturing DNS.
+                FilterLibrary.get(this@AdBlockerService).load()
             val tunnel = Builder().setSession("Still DNS protection")
-                .setMtu(1500).addAddress("10.0.0.2", 24).addDnsServer("10.0.0.2")
+                // The DNS endpoint must not be a local interface address, or the
+                // kernel can deliver queries locally instead of through the TUN.
+                .setMtu(1500).addAddress("10.0.0.1", 32).addDnsServer("10.0.0.2")
                 // DNS-only split route. A default route requires a complete TCP/IP forwarding stack.
                 .addRoute("10.0.0.2", 32).allowFamily(OsConstants.AF_INET6)
-                .setBlocking(true).setMeteredCompat()
+                .setBlocking(false).setMeteredCompat()
                 .establish() ?: error("VPN permission was revoked")
             val current = Session(tunnel)
             session = current
-            ProtectionStore.update { it.copy(connection = Connection.Connected) }
+            ProtectionStore.update { it.copy(connection = Connection.Connected, lastDnsMillis = null, consecutiveFailures = 0) }
             current.start()
+              } catch (cancelled: CancellationException) {
+                  throw cancelled
+              } catch (_: Exception) {
+                  stopProtection("Unable to load filters or start the DNS tunnel. Try again.")
+              }
+            }
         } catch (_: Exception) {
             stopProtection("Unable to establish the local VPN. Check VPN permission and try again.")
         }
@@ -67,6 +88,8 @@ class AdBlockerService : VpnService() {
     }
 
     private fun stopProtection(error: String? = null) {
+        startup?.cancel()
+        startup = null
         session?.close()
         session = null
         ProtectionStore.update { it.copy(connection = Connection.Disconnected, error = error) }
@@ -76,6 +99,7 @@ class AdBlockerService : VpnService() {
 
     override fun onRevoke() { stopProtection("VPN permission was revoked or another VPN was started."); super.onRevoke() }
     override fun onDestroy() {
+        serviceScope.cancel()
         session?.close(); session = null
         ProtectionStore.update { it.copy(connection = Connection.Disconnected) }
         super.onDestroy()
@@ -83,38 +107,63 @@ class AdBlockerService : VpnService() {
 
     private inner class Session(private val tunnel: ParcelFileDescriptor) {
         private val running = AtomicBoolean(true)
-        private val input = FileInputStream(tunnel.fileDescriptor)
-        private val output = FileOutputStream(tunnel.fileDescriptor)
         private val writeLock = Any()
-        private val resolver = UpstreamDnsResolver(this@AdBlockerService)
+        @Volatile private var settings = AppSettings.load(this@AdBlockerService)
+        private val historyLock = Any()
+        private val resolver = UpstreamDnsResolver(this@AdBlockerService, AppSettings.load(this@AdBlockerService).dnsProvider.address)
         private val workers = ThreadPoolExecutor(4, 4, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(128))
         private var reader: Thread? = null
+
+        fun reloadSettings() = synchronized(historyLock) {
+            settings = AppSettings.load(this@AdBlockerService)
+            if (!settings.keepRecentDomains) ProtectionStore.update { it.copy(recentQueries = emptyList()) }
+        }
+
+        private fun record(query: PacketParser.Query, result: QueryResult, epoch: Long, millis: Long? = null) = synchronized(historyLock) {
+            if (running.get()) ProtectionStore.record(query.question.name, result, settings.keepRecentDomains, millis, epoch)
+        }
 
         fun start() {
             reader = thread(name = "still-tun-reader") {
                 try {
                     val buffer = ByteArray(65535)
                     while (running.get()) {
-                        val count = input.read(buffer)
+                        // Nonblocking I/O keeps disconnect independent of incoming traffic.
+                        val count = synchronized(writeLock) {
+                            if (!running.get()) return@thread
+                            try { Os.read(tunnel.fileDescriptor, buffer, 0, buffer.size) }
+                            catch (error: ErrnoException) {
+                                if (error.errno == OsConstants.EAGAIN) 0 else throw error
+                            }
+                        }
                         if (count < 0) break
-                        if (count == 0) continue
+                        if (count == 0) { Thread.sleep(20); continue }
                         val query = PacketParser.parse(buffer.copyOf(count)) ?: continue
+                        val historyEpoch = ProtectionStore.historyEpoch
                         if (!query.destination.contentEquals(byteArrayOf(10, 0, 0, 2))) continue
                         ProtectionStore.update { it.copy(queries = it.queries + 1) }
-                        if (PacketParser.blocked(query.question.name, BLOCKLIST)) {
+                        if (FilterPolicy.blocked(query.question.name, settings, FilterLibrary.get(this@AdBlockerService).state.value)) {
                             write(query, PacketParser.response(query))
                             ProtectionStore.update { it.copy(blocked = it.blocked + 1) }
+                            record(query, QueryResult.Blocked, historyEpoch)
                         } else {
                             try {
                                 workers.execute {
-                                    val response = try { resolver.resolve(query) } catch (_: Exception) {
+                                    val started = android.os.SystemClock.elapsedRealtime()
+                                    val response = try {
+                                        resolver.resolve(query).also {
+                                            record(query, QueryResult.Allowed, historyEpoch, android.os.SystemClock.elapsedRealtime() - started)
+                                        }
+                                    } catch (_: Exception) {
                                         if (running.get()) ProtectionStore.update { it.copy(failures = it.failures + 1) }
+                                        record(query, QueryResult.Failed, historyEpoch)
                                         PacketParser.response(query, error = 2)
                                     }
                                     try { write(query, response) } catch (_: Exception) { failed() }
                                 }
                             } catch (_: java.util.concurrent.RejectedExecutionException) {
                                 ProtectionStore.update { it.copy(failures = it.failures + 1) }
+                                record(query, QueryResult.Failed, historyEpoch)
                                 write(query, PacketParser.response(query, error = 2))
                             }
                         }
@@ -125,7 +174,10 @@ class AdBlockerService : VpnService() {
         }
 
         private fun write(query: PacketParser.Query, dns: ByteArray) = synchronized(writeLock) {
-            if (running.get()) output.write(PacketParser.wrap(query, dns))
+            if (running.get()) {
+                val packet = PacketParser.wrap(query, dns)
+                Os.write(tunnel.fileDescriptor, packet, 0, packet.size)
+            }
         }
 
         private fun failed() {
@@ -138,11 +190,9 @@ class AdBlockerService : VpnService() {
             if (!running.getAndSet(false)) return
             resolver.close()
             workers.shutdownNow()
-            // Interrupt blocking descriptor I/O and dispose stream owners before a new session.
+            // Wake the idle reader; the descriptor has a single owner and cannot block close.
             reader?.interrupt()
             synchronized(writeLock) {
-                runCatching { input.close() }
-                runCatching { output.close() }
                 runCatching { tunnel.close() }
             }
         }
