@@ -1,0 +1,15 @@
+.gradle/
+.idea/
+local.properties
+**/build/
+*.iml
+.tools/
+build-validation.log
+lint-validation.log
+Still-source.zip
+*.apk
+*.aab
+*.jks
+*.keystore
+.env
+.env.*
