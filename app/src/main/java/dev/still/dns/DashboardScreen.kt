@@ -44,32 +44,42 @@ fun DashboardScreen(
     filterLibrary: FilterLibraryState = FilterLibraryState(),
     onUpdateFilters: () -> Unit = {},
     onOpenPrivateBrowser: () -> Unit = {},
-    onOpenOtherBrowser: () -> Unit = {}
+    onOpenOtherBrowser: () -> Unit = {},
+    lifetime: LifetimeTotals = LifetimeTotals()
 ) {
     var settings by rememberSaveable { mutableStateOf(false) }
+    var about by rememberSaveable { mutableStateOf(false) }
+    if (settings) {
+        SettingsScreen(state, preferences, onSettingsChange, onToggle, onResetStatistics) { settings = false }
+        return
+    }
+    if (about) { AboutScreen { about = false }; return }
     val colors = MaterialTheme.colorScheme
+    val accent by animateColorAsState(if (state.connected) colors.primary else colors.error, label = "statusAccent")
+    val animatedBlocked by animateFloatAsState(state.blocked.toFloat(), tween(500), label = "blockedCount")
     Scaffold(containerColor = colors.background) { insets ->
         Box(Modifier.fillMaxSize().padding(insets), contentAlignment = Alignment.TopCenter) {
             Column(
                 Modifier.widthIn(max = 640.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(24.dp)
             ) {
+                Box(Modifier.fillMaxWidth().height(3.dp).background(accent, RoundedCornerShape(3.dp)))
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(colors.primaryContainer), contentAlignment = Alignment.Center) {
                         Icon(Icons.Outlined.Shield, null, tint = colors.onPrimaryContainer)
                     }
                     Spacer(Modifier.width(12.dp))
                     Text("still", fontSize = 30.sp, fontWeight = FontWeight.Bold, letterSpacing = (-1).sp, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { about = true }) { Icon(Icons.Outlined.Info, "About Still") }
                     IconButton(onClick = { settings = true }, modifier = Modifier.border(1.dp, colors.outlineVariant, CircleShape)) {
                         Icon(Icons.Outlined.Settings, "Protection settings")
                     }
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("LESS NOISE. MORE SPACE.", style = MaterialTheme.typography.labelSmall, letterSpacing = 2.sp, color = colors.primary)
+                    Text("${NumberFormat.getIntegerInstance().format(animatedBlocked.toLong())} requests blocked this session", style = MaterialTheme.typography.labelLarge, color = colors.primary)
                     Text(if (state.connected) "A quieter internet." else "Your space, protected.", style = MaterialTheme.typography.displaySmall)
                     Text("Keep known ad domains out of your day.", color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
                 }
-                BrowseCard(state.connected, onOpenPrivateBrowser, onOpenOtherBrowser)
                 Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                     PowerButton(state, onToggle)
                     OutlinedButton(onClick = onToggle) {
@@ -119,6 +129,12 @@ fun DashboardScreen(
                     }
                 }
                 ProtectionControls(state, preferences, onSettingsChange, onClearHistory)
+                Text("All time", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    StatCard("Blocked", NumberFormat.getIntegerInstance().format(lifetime.blocked), "Saved on this device", Icons.Outlined.GppGood, Modifier.weight(1f))
+                    StatCard("Queries", NumberFormat.getIntegerInstance().format(lifetime.queries), "DNS requests checked", Icons.Outlined.Dns, Modifier.weight(1f))
+                }
+                BrowseCard(state.connected, onOpenPrivateBrowser, onOpenOtherBrowser)
                 FilterListsCard(filterLibrary, preferences, onSettingsChange, onUpdateFilters)
                 HorizontalDivider(color = colors.outlineVariant)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -131,45 +147,6 @@ fun DashboardScreen(
                 Text("${NumberFormat.getIntegerInstance().format(state.queries)} queries checked  /  ${state.failures} upstream failures", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             }
         }
-    }
-    if (settings) {
-        AlertDialog(onDismissRequest = { settings = false }, icon = { Icon(Icons.Outlined.Tune, null) },
-            title = { Text("Protection settings") },
-            text = {
-                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Protection", modifier = Modifier.weight(1f))
-                        Switch(checked = state.connection != Connection.Disconnected, onCheckedChange = { onToggle() }, modifier = Modifier.semantics { contentDescription = "Protection" })
-                    }
-                    Text("Appearance", fontWeight = FontWeight.Medium)
-                    Appearance.entries.forEach { appearance ->
-                        Row(Modifier.fillMaxWidth().selectable(selected = preferences.appearance == appearance, role = Role.RadioButton, onClick = { onSettingsChange(preferences.copy(appearance = appearance)) }), verticalAlignment = Alignment.CenterVertically) {
-                            RadioButton(selected = preferences.appearance == appearance, onClick = null)
-                            Text(appearance.name)
-                        }
-                    }
-                    if (android.os.Build.VERSION.SDK_INT >= 31) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Use device colors", modifier = Modifier.weight(1f))
-                            Switch(checked = preferences.dynamicColors, onCheckedChange = { onSettingsChange(preferences.copy(dynamicColors = it)) }, modifier = Modifier.semantics { contentDescription = "Use device colors" })
-                        }
-                    }
-                    Text("DNS resolver", fontWeight = FontWeight.Medium)
-                    Text("Turn protection off to change the resolver. DNS queries are sent unencrypted.")
-                    DnsProvider.entries.forEach { provider ->
-                        val enabled = state.connection == Connection.Disconnected
-                        Row(Modifier.fillMaxWidth().selectable(selected = preferences.dnsProvider == provider, enabled = enabled, role = Role.RadioButton, onClick = { onSettingsChange(preferences.copy(dnsProvider = provider)) }), verticalAlignment = Alignment.CenterVertically) {
-                            RadioButton(selected = preferences.dnsProvider == provider, onClick = null, enabled = enabled)
-                            Text("${provider.name} (${provider.address})")
-                        }
-                    }
-                    TextButton(onClick = onResetStatistics) { Text("Reset session statistics") }
-                    Text("${preferences.protectionLevel.title} built-in blocklist\n" + FilterPolicy.rules(preferences.protectionLevel).sorted().joinToString("\n"))
-                    Text("Subdomains are included. Counters last until the app process ends. Data savings are an estimate, not measured traffic.")
-                    Text("These are small starter lists, not a malware database or a complete ad blocker. DNS filtering cannot reliably remove ads served from the same domains as content, including YouTube video ads.")
-                    Text("This version filters IPv4 UDP DNS only. Private DNS, encrypted DNS, cached answers and app-specific resolvers may bypass filtering. Upstream TCP fallback is supported. Another VPN cannot run alongside Still.")
-                }
-            }, confirmButton = { TextButton(onClick = { settings = false }) { Text("Done") } })
     }
 }
 

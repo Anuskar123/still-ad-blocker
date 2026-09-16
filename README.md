@@ -1,18 +1,24 @@
 # Still
 
+## Version 2.0
+
+Still 2.0 adds first-launch onboarding, persistent lifetime DNS totals, a Quick Settings tile, automatic daily filter updates, full Settings and About screens, adaptive launcher artwork and signed, optimized release builds. See [release instructions](RELEASE.md), [validation](VALIDATION.md) and [privacy policy](app/src/main/assets/privacy-policy.txt). Live filter downloading stalled in the latest phone test and remains unverified on that connection.
+
 ## Download for Android
 
-[Download Still 1.4 APK](https://github.com/Anuskar123/still-ad-blocker/releases/download/v1.4/Still-1.4.apk)
+[Update existing Still installations to 2.0](https://github.com/Anuskar123/still-ad-blocker/releases/download/v2.0/Still-2.0-debug-update.apk)
 
 Open this link on your Android phone, download the APK, and open it to install or update Still. Android may ask you to allow installation from your browser. This is a debug-signed testing build for Android 8.0 or newer; private browsing also requires a compatible, updated Android System WebView.
 
-[Release notes and APK checksum](https://github.com/Anuskar123/still-ad-blocker/releases/tag/v1.4)
+[Download the optimized 2.0 release APK for a fresh installation](https://github.com/Anuskar123/still-ad-blocker/releases/download/v2.0/Still-2.0-release.apk). This uses a different signing key and cannot replace the earlier debug-signed app. Use the update APK above to retain your existing installation and data.
 
-A Kotlin and Material 3 local DNS ad blocker for Android 8.0 and later. Target SDK is 34; compile SDK is 35. Includes dynamic light/dark colors, an animated power control, session statistics, permission handling, a foreground VPN service, protected upstream sockets and a pure Kotlin packet codec.
+[Release notes and APK checksums](https://github.com/Anuskar123/still-ad-blocker/releases/tag/v2.0)
+
+A Kotlin and Material 3 local DNS ad blocker for Android 8.0 and later. Target and compile SDK are 36. Includes light/dark colors, an animated power control, statistics, permission handling, a foreground VPN service, protected upstream sockets and a pure Kotlin packet codec.
 
 ## Build
 
-Open this folder in Android Studio. Use JDK 17, install Android SDK Platform 35, and let Gradle sync. The Gradle 8.9 wrapper is included with a pinned distribution checksum.
+Open this folder in Android Studio. Use JDK 17, install Android SDK Platform 36, and let Gradle sync. The Gradle 8.11.1 wrapper is included with a pinned distribution checksum.
 
 ```powershell
 .\gradlew.bat :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
@@ -31,7 +37,7 @@ The requested `addRoute("0.0.0.0", 0)` would capture every IPv4 packet. A servic
 - Private sessions disable third-party cookies, file/content access, downloads, location, camera/microphone requests and saved autofill. The private screen blocks screenshots and recents previews. Still does not retain a private browsing history. DNS domain logging is paused for all device queries during the private session and late replies from that session are excluded. Previously recorded non-private domains remain in the optional DNS log.
 - Private browsing does not hide your IP address or erase records held by websites, networks, keyboards or other apps. Private-browser filtering applies selected domain rules to WebView requests. It does not implement a full browser extension or cosmetic page filtering.
 - Open another browser presents Android's app chooser once DNS protection is on. System-DNS filtering can apply to other browsers without installing a browser extension. Still cannot erase another browser's history, control its private mode or guarantee filtering when it uses its own encrypted resolver.
-- Downloadable lists add HaGeZi Multi LIGHT (ads/trackers) and TIF Mini (threat domains). Both are optional, disabled by default and manually updated from the publisher's GitHub repository over HTTPS. Sources and GPL-3.0 licence links are available in the app. No third-party list contents or AdGuard code are bundled in the APK.
+- Downloadable lists add HaGeZi Multi LIGHT (ads/trackers) and TIF Mini (threat domains). Both are optional and disabled by default. Enabled lists update approximately daily when automatic updates are on; manual refresh is also available. Downloads use the publisher's GitHub repository over HTTPS. Sources and GPL-3.0 licence links are available in the app. No third-party list contents or AdGuard code are bundled in the APK.
 - Downloads are limited to 8 MiB and 300,000 rules per list, validated against the declared entry count and atomically replace the previous cached file only after validation. Failed updates preserve the last working copy. Saved files load before the VPN tunnel starts. Indexed suffix matching avoids a linear scan of every downloaded rule per query. Allow rules override downloaded lists as well as built-in/custom rules.
 - Version 1.2 adds Basic (4 rules), Balanced (9 rules) and Strict (14 rules). Basic remains the default. Balanced adds selected advertising and analytics domains; Strict includes selected crash reporting and usage analytics. These are bundled starter lists, not a maintained malware database. Strict can affect app features.
 - Manage up to 100 custom blocked domains and 100 allowed domains from the dashboard. Domain rules include subdomains; allow rules override built-in and custom blocks. Entries accept plain domain names and international domains, not URLs, wildcards or IP addresses. Rules and levels persist and apply to new DNS requests while connected. Existing DNS caches may delay visible changes.
@@ -47,7 +53,7 @@ The requested `addRoute("0.0.0.0", 0)` would capture every IPv4 packet. A servic
 - Fragmented, invalid or unsupported packets are rejected. Upstream TCP fallback is supported; client-to-tunnel TCP DNS and IPv6 DNS transport are not implemented. IPv6 ordinary traffic is allowed outside the tunnel.
 - Private DNS, DNS-over-HTTPS, app-specific resolvers and cached answers may bypass filtering. This small list cannot block all ads, especially ads served from content domains.
 - Filtering is local; permitted DNS names are sent unencrypted to the selected DNS provider. This app is not an encrypted VPN and does not hide your IP address. The status label says "Filtering active" when the local VPN is connected.
-- "Blocked requests" counts blocked queries, including retries and non-A queries, not distinct domains or confirmed removed ad impressions. Data Saved estimates 50 KB per blocked query. Counters survive activity recreation but reset when the process ends.
+- "Blocked requests" counts blocked queries, including retries and non-A queries, not distinct domains or confirmed removed ad impressions. Data Saved estimates 50 KB per blocked query. Session counters reset when the process ends. Lifetime blocked/query totals are saved locally and survive restarts; uninstalling or clearing app storage removes them.
 - Android allows one active VPN. Always-on and lockdown mode are not supported. A persistent notification includes a disconnect action; notification denial does not prevent foreground service operation.
 - This is a working implementation for the stated DNS subset, not a production-certified universal ad blocker. Device validation is required before distribution.
 

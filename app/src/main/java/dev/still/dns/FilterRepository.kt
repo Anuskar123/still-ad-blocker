@@ -102,7 +102,7 @@ class FilterRepository(
     suspend fun refresh(selected: Set<String>) {
         load()
         withContext(Dispatchers.IO) {
-            if (!mutex.tryLock()) return@withContext
+            mutex.lock()
             try {
                 mutable.value = mutable.value.copy(updating = true)
                 DownloadableFilter.entries.filter { it.name in selected }.forEach { filter ->

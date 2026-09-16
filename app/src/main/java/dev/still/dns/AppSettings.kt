@@ -15,7 +15,9 @@ data class AppSettings(
     val allowedDomains: Set<String> = emptySet(),
     val blockedDomains: Set<String> = emptySet(),
     val keepRecentDomains: Boolean = false,
-    val enabledSubscriptions: Set<String> = emptySet()
+    val enabledSubscriptions: Set<String> = emptySet(),
+    val autoUpdateFilters: Boolean = true,
+    val notifyFilterUpdates: Boolean = true
 ) {
     fun save(context: Context) {
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit()
@@ -26,7 +28,9 @@ data class AppSettings(
             .putStringSet("allowedDomains", allowedDomains)
             .putStringSet("blockedDomains", blockedDomains)
             .putBoolean("keepRecentDomains", keepRecentDomains)
-            .putStringSet("enabledSubscriptions", enabledSubscriptions).apply()
+            .putStringSet("enabledSubscriptions", enabledSubscriptions)
+            .putBoolean("autoUpdateFilters", autoUpdateFilters)
+            .putBoolean("notifyFilterUpdates", notifyFilterUpdates).apply()
     }
 
     companion object {
@@ -40,7 +44,9 @@ data class AppSettings(
                 prefs.getStringSet("allowedDomains", emptySet())!!.toSet(),
                 prefs.getStringSet("blockedDomains", emptySet())!!.toSet(),
                 prefs.getBoolean("keepRecentDomains", false),
-                prefs.getStringSet("enabledSubscriptions", emptySet())!!.toSet()
+                prefs.getStringSet("enabledSubscriptions", emptySet())!!.toSet(),
+                prefs.getBoolean("autoUpdateFilters", true),
+                prefs.getBoolean("notifyFilterUpdates", true)
             )
         }
     }

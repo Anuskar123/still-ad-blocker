@@ -11,5 +11,7 @@ Still-source.zip
 *.aab
 *.jks
 *.keystore
+signing/
+dist/
 .env
 .env.*

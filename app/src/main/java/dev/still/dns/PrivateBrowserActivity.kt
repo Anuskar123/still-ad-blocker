@@ -16,6 +16,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowForward
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,6 +42,9 @@ class PrivateBrowserActivity : ComponentActivity() {
     private var address by mutableStateOf("")
     private var message by mutableStateOf<String?>(null)
     private var pageProgress by mutableIntStateOf(100)
+    private var pageTitle by mutableStateOf("")
+    private var canGoBack by mutableStateOf(false)
+    private var canGoForward by mutableStateOf(false)
     private var blocked by mutableIntStateOf(0)
     private var cleanupSupported = false
     private var sessionStarted = false
@@ -69,10 +77,11 @@ class PrivateBrowserActivity : ComponentActivity() {
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go, autoCorrectEnabled = false),
                             keyboardActions = KeyboardActions(onGo = { navigate() }),
                             trailingIcon = { TextButton(onClick = ::navigate, enabled = ready && !ending) { Text("Go") } })
+                        if (pageTitle.isNotBlank()) Text(pageTitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            TextButton(onClick = { browser?.let { if (it.canGoBack()) it.goBack() } }, enabled = ready && !ending) { Text("Back") }
-                            TextButton(onClick = { browser?.let { if (it.canGoForward()) it.goForward() } }, enabled = ready && !ending) { Text("Forward") }
-                            TextButton(onClick = { browser?.reload() }, enabled = ready && !ending) { Text("Reload") }
+                            IconButton(onClick = { browser?.goBack() }, enabled = ready && !ending && canGoBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") }
+                            IconButton(onClick = { browser?.goForward() }, enabled = ready && !ending && canGoForward) { Icon(Icons.AutoMirrored.Outlined.ArrowForward, "Forward") }
+                            IconButton(onClick = { browser?.reload() }, enabled = ready && !ending) { Icon(Icons.Outlined.Refresh, "Reload") }
                             Text("$blocked blocked", modifier = Modifier.align(Alignment.CenterVertically), style = MaterialTheme.typography.labelSmall)
                         }
                         Text("Leaving this screen ends and erases the session.", style = MaterialTheme.typography.labelSmall)
@@ -135,6 +144,7 @@ class PrivateBrowserActivity : ComponentActivity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(view, false)
         view.setDownloadListener { _, _, _, _, _ -> message = "Downloads are not saved in private sessions." }
         view.webChromeClient = object : WebChromeClient() {
+            override fun onReceivedTitle(view: WebView?, title: String?) { pageTitle = title.orEmpty().take(200) }
             override fun onProgressChanged(view: WebView?, newProgress: Int) { pageProgress = newProgress }
             override fun onPermissionRequest(request: PermissionRequest) { request.deny() }
             override fun onGeolocationPermissionsShowPrompt(origin: String?, callback: GeolocationPermissions.Callback?) {
@@ -142,6 +152,10 @@ class PrivateBrowserActivity : ComponentActivity() {
             }
         }
         view.webViewClient = object : WebViewClient() {
+            override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+                canGoBack = view.canGoBack()
+                canGoForward = view.canGoForward()
+            }
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 if (!BrowserNavigation.isWebUrl(request.url.toString())) {
                     message = "Only HTTPS pages open in this private session. External app links stay closed."
@@ -158,6 +172,7 @@ class PrivateBrowserActivity : ComponentActivity() {
                 return null
             }
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                pageTitle = ""
                 if (url != null && url != "about:blank") address = url
             }
             override fun onReceivedError(view: WebView?, request: WebResourceRequest, error: WebResourceError) {
@@ -209,6 +224,7 @@ class PrivateBrowserActivity : ComponentActivity() {
         }
         browser = null
         address = ""
+        pageTitle = ""
     }
 
     private fun closeAndErase() {

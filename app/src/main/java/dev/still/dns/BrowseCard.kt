@@ -1,6 +1,10 @@
 package dev.still.dns
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.background
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.PrivacyTip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -9,7 +13,8 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun BrowseCard(connected: Boolean, onPrivate: () -> Unit, onOther: () -> Unit) {
     OutlinedCard {
-        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.surfaceContainer, MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)))).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Icon(Icons.Outlined.PrivacyTip, null, tint = MaterialTheme.colorScheme.primary)
             Text("Browse your way", style = MaterialTheme.typography.titleMedium)
             Button(onClick = onPrivate, modifier = Modifier.fillMaxWidth()) { Text("Open Still private browser") }
             Text("A fresh session with your filter rules. Leaving the private browser erases its cookies, website storage and browsing history. After a forced stop, cleanup runs before the next session.", style = MaterialTheme.typography.bodySmall)

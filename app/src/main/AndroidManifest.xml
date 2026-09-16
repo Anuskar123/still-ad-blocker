@@ -11,7 +11,15 @@
             <data android:scheme="https" />
         </intent>
     </queries>
-    <application android:label="Still" android:icon="@drawable/ic_shield" android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="true" android:theme="@android:style/Theme.Material.NoActionBar">
+    <application android:label="${appLabel}" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="true" android:theme="@android:style/Theme.Material.NoActionBar">
+        <activity android:name=".OnboardingActivity" android:exported="false" />
+        <activity android:name="com.google.android.gms.oss.licenses.OssLicensesMenuActivity" android:theme="@style/StillLicensesTheme" android:exported="false" />
+        <activity android:name="com.google.android.gms.oss.licenses.OssLicensesActivity" android:theme="@style/StillLicensesTheme" android:exported="false" />
+        <service android:name=".StillTileService" android:exported="true" android:icon="@drawable/ic_shield_outline"
+            android:label="Still DNS" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE" /></intent-filter>
+            <meta-data android:name="android.service.quicksettings.TOGGLEABLE_TILE" android:value="true" />
+        </service>
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

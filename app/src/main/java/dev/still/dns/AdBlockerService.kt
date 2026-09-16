@@ -142,7 +142,9 @@ class AdBlockerService : VpnService() {
                         val historyEpoch = ProtectionStore.historyEpoch
                         if (!query.destination.contentEquals(byteArrayOf(10, 0, 0, 2))) continue
                         ProtectionStore.update { it.copy(queries = it.queries + 1) }
-                        if (FilterPolicy.blocked(query.question.name, settings, FilterLibrary.get(this@AdBlockerService).state.value)) {
+                        val isBlocked = FilterPolicy.blocked(query.question.name, settings, FilterLibrary.get(this@AdBlockerService).state.value)
+                        LifetimeStatistics.get(this@AdBlockerService).record(isBlocked)
+                        if (isBlocked) {
                             write(query, PacketParser.response(query))
                             ProtectionStore.update { it.copy(blocked = it.blocked + 1) }
                             record(query, QueryResult.Blocked, historyEpoch)

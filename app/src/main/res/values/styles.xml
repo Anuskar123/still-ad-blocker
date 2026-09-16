@@ -1,0 +1,6 @@
+<resources>
+    <style name="StillLicensesTheme" parent="Theme.AppCompat.DayNight.DarkActionBar">
+        <item name="colorPrimary">#0D2428</item>
+        <item name="colorAccent">#006D53</item>
+    </style>
+</resources>

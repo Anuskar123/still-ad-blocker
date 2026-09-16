@@ -5,23 +5,53 @@ The nine requested files appear first, followed by the remaining project configu
 ## app/build.gradle.kts
 
 ```kotlin
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.android.gms.oss-licenses-plugin")
+}
+val releaseSecrets = Properties().apply {
+    val location = rootProject.file("signing/release.properties")
+    if (location.exists()) location.inputStream().use { load(it) }
 }
 android {
     namespace = "dev.still.dns"
-    compileSdk = 35
+    compileSdk = 36
     defaultConfig {
         applicationId = "dev.still.dns"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 5
-        versionName = "1.4"
+        targetSdk = 36
+        versionCode = 6
+        versionName = "2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        manifestPlaceholders["appLabel"] = "Still"
     }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
+    signingConfigs {
+        if (releaseSecrets.isNotEmpty()) create("release") {
+            storeFile = rootProject.file(releaseSecrets.getProperty("storeFile"))
+            storePassword = releaseSecrets.getProperty("storePassword")
+            keyAlias = releaseSecrets.getProperty("keyAlias")
+            keyPassword = releaseSecrets.getProperty("keyPassword")
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (releaseSecrets.isNotEmpty()) signingConfig = signingConfigs.getByName("release")
+        }
+        create("releaseCheck") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".releasecheck"
+            manifestPlaceholders["appLabel"] = "Still release check"
+            matchingFallbacks += "release"
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -38,8 +68,14 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.webkit:webkit:1.13.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("androidx.work:work-runtime-ktx:2.10.1")
+    implementation("com.google.android.gms:play-services-oss-licenses:17.1.0")
+
+    // Reserved for local AI experiments; no shipped feature currently calls this SDK.
+    debugImplementation("com.google.mediapipe:tasks-genai:0.10.14")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:runner:1.6.2")
@@ -64,7 +100,15 @@ dependencies {
             <data android:scheme="https" />
         </intent>
     </queries>
-    <application android:label="Still" android:icon="@drawable/ic_shield" android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="true" android:theme="@android:style/Theme.Material.NoActionBar">
+    <application android:label="${appLabel}" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="true" android:theme="@android:style/Theme.Material.NoActionBar">
+        <activity android:name=".OnboardingActivity" android:exported="false" />
+        <activity android:name="com.google.android.gms.oss.licenses.OssLicensesMenuActivity" android:theme="@style/StillLicensesTheme" android:exported="false" />
+        <activity android:name="com.google.android.gms.oss.licenses.OssLicensesActivity" android:theme="@style/StillLicensesTheme" android:exported="false" />
+        <service android:name=".StillTileService" android:exported="true" android:icon="@drawable/ic_shield_outline"
+            android:label="Still DNS" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE" /></intent-filter>
+            <meta-data android:name="android.service.quicksettings.TOGGLEABLE_TILE" android:value="true" />
+        </service>
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -157,6 +201,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 
 class MainActivity : ComponentActivity() {
+    private var showVpnDisclosure by mutableStateOf(false)
     private val viewModel: AdBlockerViewModel by viewModels()
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
     private val vpnPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -164,7 +209,13 @@ class MainActivity : ComponentActivity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!getSharedPreferences("onboarding", MODE_PRIVATE).getBoolean("complete", false)) {
+            startActivity(Intent(this, OnboardingActivity::class.java))
+            finish()
+            return
+        }
         enableEdgeToEdge()
+        FilterUpdateWorker.schedule(this, AppSettings.load(this))
         val filterRepository = FilterLibrary.get(this)
         viewModel.loadFilters(filterRepository)
         setContent {
@@ -172,18 +223,20 @@ class MainActivity : ComponentActivity() {
             StillTheme(settings) {
                 val state by viewModel.state.collectAsStateWithLifecycle()
                 val filterLibrary by filterRepository.state.collectAsStateWithLifecycle()
+                val lifetime by LifetimeStatistics.get(this).state.collectAsStateWithLifecycle()
                 DashboardScreen(state, onToggle = {
                     if (state.connection != Connection.Disconnected) {
                         startService(Intent(this, AdBlockerService::class.java).setAction(AdBlockerService.STOP))
                     }
                     else if (state.connection == Connection.Disconnected) {
-                        val permission = VpnService.prepare(this)
-                        if (permission != null) vpnPermission.launch(permission) else startProtection()
+                        if (!getSharedPreferences("onboarding", MODE_PRIVATE).getBoolean("vpnDisclosureAccepted", false)) showVpnDisclosure = true
+                        else requestProtection()
                     }
                 }, onDismissError = viewModel::dismissError, preferences = settings,
                     onSettingsChange = {
                         settings = it
                         it.save(this)
+                        FilterUpdateWorker.schedule(this, it)
                         if (!it.keepRecentDomains) ProtectionStore.update { current -> current.copy(recentQueries = emptyList()) }
                         if (state.connection != Connection.Disconnected) {
                             startService(Intent(this, AdBlockerService::class.java).setAction(AdBlockerService.RELOAD))
@@ -191,6 +244,7 @@ class MainActivity : ComponentActivity() {
                     },
                     onResetStatistics = { ProtectionStore.update { it.copy(blocked = 0, queries = 0, failures = 0, lastDnsMillis = null, consecutiveFailures = 0) } },
                     onClearHistory = { ProtectionStore.update { it.copy(recentQueries = emptyList()) } },
+                    lifetime = lifetime,
                     filterLibrary = filterLibrary,
                     onUpdateFilters = { viewModel.updateFilters(filterRepository, settings.enabledSubscriptions) },
                     onOpenPrivateBrowser = { startActivity(Intent(this, PrivateBrowserActivity::class.java)) },
@@ -203,8 +257,24 @@ class MainActivity : ComponentActivity() {
                             ProtectionStore.update { it.copy(error = "No browser is available to open this link.") }
                         }
                     })
+                if (showVpnDisclosure) androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { showVpnDisclosure = false },
+                    title = { androidx.compose.material3.Text("Allow local DNS filtering?") },
+                    text = { androidx.compose.material3.Text("Still uses a local VPN to inspect DNS domain names and block matching requests. Allowed names are sent unencrypted to your selected DNS provider. Still does not send domain logs to its developer, hide your IP address, or encrypt browsing traffic. You can turn it off at any time.") },
+                    confirmButton = { androidx.compose.material3.TextButton(onClick = {
+                        getSharedPreferences("onboarding", MODE_PRIVATE).edit().putBoolean("vpnDisclosureAccepted", true).apply()
+                        showVpnDisclosure = false
+                        requestProtection()
+                    }) { androidx.compose.material3.Text("Agree and continue") } },
+                    dismissButton = { androidx.compose.material3.TextButton(onClick = { showVpnDisclosure = false }) { androidx.compose.material3.Text("Not now") } }
+                )
             }
         }
+    }
+
+    private fun requestProtection() {
+        val permission = VpnService.prepare(this)
+        if (permission != null) vpnPermission.launch(permission) else startProtection()
     }
 
     private fun startProtection() {
@@ -339,32 +409,42 @@ fun DashboardScreen(
     filterLibrary: FilterLibraryState = FilterLibraryState(),
     onUpdateFilters: () -> Unit = {},
     onOpenPrivateBrowser: () -> Unit = {},
-    onOpenOtherBrowser: () -> Unit = {}
+    onOpenOtherBrowser: () -> Unit = {},
+    lifetime: LifetimeTotals = LifetimeTotals()
 ) {
     var settings by rememberSaveable { mutableStateOf(false) }
+    var about by rememberSaveable { mutableStateOf(false) }
+    if (settings) {
+        SettingsScreen(state, preferences, onSettingsChange, onToggle, onResetStatistics) { settings = false }
+        return
+    }
+    if (about) { AboutScreen { about = false }; return }
     val colors = MaterialTheme.colorScheme
+    val accent by animateColorAsState(if (state.connected) colors.primary else colors.error, label = "statusAccent")
+    val animatedBlocked by animateFloatAsState(state.blocked.toFloat(), tween(500), label = "blockedCount")
     Scaffold(containerColor = colors.background) { insets ->
         Box(Modifier.fillMaxSize().padding(insets), contentAlignment = Alignment.TopCenter) {
             Column(
                 Modifier.widthIn(max = 640.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(24.dp)
             ) {
+                Box(Modifier.fillMaxWidth().height(3.dp).background(accent, RoundedCornerShape(3.dp)))
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(colors.primaryContainer), contentAlignment = Alignment.Center) {
                         Icon(Icons.Outlined.Shield, null, tint = colors.onPrimaryContainer)
                     }
                     Spacer(Modifier.width(12.dp))
                     Text("still", fontSize = 30.sp, fontWeight = FontWeight.Bold, letterSpacing = (-1).sp, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { about = true }) { Icon(Icons.Outlined.Info, "About Still") }
                     IconButton(onClick = { settings = true }, modifier = Modifier.border(1.dp, colors.outlineVariant, CircleShape)) {
                         Icon(Icons.Outlined.Settings, "Protection settings")
                     }
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("LESS NOISE. MORE SPACE.", style = MaterialTheme.typography.labelSmall, letterSpacing = 2.sp, color = colors.primary)
+                    Text("${NumberFormat.getIntegerInstance().format(animatedBlocked.toLong())} requests blocked this session", style = MaterialTheme.typography.labelLarge, color = colors.primary)
                     Text(if (state.connected) "A quieter internet." else "Your space, protected.", style = MaterialTheme.typography.displaySmall)
                     Text("Keep known ad domains out of your day.", color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
                 }
-                BrowseCard(state.connected, onOpenPrivateBrowser, onOpenOtherBrowser)
                 Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                     PowerButton(state, onToggle)
                     OutlinedButton(onClick = onToggle) {
@@ -414,6 +494,12 @@ fun DashboardScreen(
                     }
                 }
                 ProtectionControls(state, preferences, onSettingsChange, onClearHistory)
+                Text("All time", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    StatCard("Blocked", NumberFormat.getIntegerInstance().format(lifetime.blocked), "Saved on this device", Icons.Outlined.GppGood, Modifier.weight(1f))
+                    StatCard("Queries", NumberFormat.getIntegerInstance().format(lifetime.queries), "DNS requests checked", Icons.Outlined.Dns, Modifier.weight(1f))
+                }
+                BrowseCard(state.connected, onOpenPrivateBrowser, onOpenOtherBrowser)
                 FilterListsCard(filterLibrary, preferences, onSettingsChange, onUpdateFilters)
                 HorizontalDivider(color = colors.outlineVariant)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -426,45 +512,6 @@ fun DashboardScreen(
                 Text("${NumberFormat.getIntegerInstance().format(state.queries)} queries checked  /  ${state.failures} upstream failures", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             }
         }
-    }
-    if (settings) {
-        AlertDialog(onDismissRequest = { settings = false }, icon = { Icon(Icons.Outlined.Tune, null) },
-            title = { Text("Protection settings") },
-            text = {
-                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Protection", modifier = Modifier.weight(1f))
-                        Switch(checked = state.connection != Connection.Disconnected, onCheckedChange = { onToggle() }, modifier = Modifier.semantics { contentDescription = "Protection" })
-                    }
-                    Text("Appearance", fontWeight = FontWeight.Medium)
-                    Appearance.entries.forEach { appearance ->
-                        Row(Modifier.fillMaxWidth().selectable(selected = preferences.appearance == appearance, role = Role.RadioButton, onClick = { onSettingsChange(preferences.copy(appearance = appearance)) }), verticalAlignment = Alignment.CenterVertically) {
-                            RadioButton(selected = preferences.appearance == appearance, onClick = null)
-                            Text(appearance.name)
-                        }
-                    }
-                    if (android.os.Build.VERSION.SDK_INT >= 31) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Use device colors", modifier = Modifier.weight(1f))
-                            Switch(checked = preferences.dynamicColors, onCheckedChange = { onSettingsChange(preferences.copy(dynamicColors = it)) }, modifier = Modifier.semantics { contentDescription = "Use device colors" })
-                        }
-                    }
-                    Text("DNS resolver", fontWeight = FontWeight.Medium)
-                    Text("Turn protection off to change the resolver. DNS queries are sent unencrypted.")
-                    DnsProvider.entries.forEach { provider ->
-                        val enabled = state.connection == Connection.Disconnected
-                        Row(Modifier.fillMaxWidth().selectable(selected = preferences.dnsProvider == provider, enabled = enabled, role = Role.RadioButton, onClick = { onSettingsChange(preferences.copy(dnsProvider = provider)) }), verticalAlignment = Alignment.CenterVertically) {
-                            RadioButton(selected = preferences.dnsProvider == provider, onClick = null, enabled = enabled)
-                            Text("${provider.name} (${provider.address})")
-                        }
-                    }
-                    TextButton(onClick = onResetStatistics) { Text("Reset session statistics") }
-                    Text("${preferences.protectionLevel.title} built-in blocklist\n" + FilterPolicy.rules(preferences.protectionLevel).sorted().joinToString("\n"))
-                    Text("Subdomains are included. Counters last until the app process ends. Data savings are an estimate, not measured traffic.")
-                    Text("These are small starter lists, not a malware database or a complete ad blocker. DNS filtering cannot reliably remove ads served from the same domains as content, including YouTube video ads.")
-                    Text("This version filters IPv4 UDP DNS only. Private DNS, encrypted DNS, cached answers and app-specific resolvers may bypass filtering. Upstream TCP fallback is supported. Another VPN cannot run alongside Still.")
-                }
-            }, confirmButton = { TextButton(onClick = { settings = false }) { Text("Done") } })
     }
 }
 
@@ -666,7 +713,9 @@ class AdBlockerService : VpnService() {
                         val historyEpoch = ProtectionStore.historyEpoch
                         if (!query.destination.contentEquals(byteArrayOf(10, 0, 0, 2))) continue
                         ProtectionStore.update { it.copy(queries = it.queries + 1) }
-                        if (FilterPolicy.blocked(query.question.name, settings, FilterLibrary.get(this@AdBlockerService).state.value)) {
+                        val isBlocked = FilterPolicy.blocked(query.question.name, settings, FilterLibrary.get(this@AdBlockerService).state.value)
+                        LifetimeStatistics.get(this@AdBlockerService).record(isBlocked)
+                        if (isBlocked) {
                             write(query, PacketParser.response(query))
                             ProtectionStore.update { it.copy(blocked = it.blocked + 1) }
                             record(query, QueryResult.Blocked, historyEpoch)
@@ -971,7 +1020,7 @@ class UpstreamDnsResolver(
 
 ```kotlin
 plugins {
-    id("com.android.application") version "8.7.3" apply false
+    id("com.android.application") version "8.10.1" apply false
     id("org.jetbrains.kotlin.android") version "2.0.21" apply false
     id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
 }
@@ -981,6 +1030,13 @@ plugins {
 
 ```kotlin
 pluginManagement {
+    resolutionStrategy {
+        eachPlugin {
+            if (requested.id.id == "com.google.android.gms.oss-licenses-plugin") {
+                useModule("com.google.android.gms:oss-licenses-plugin:0.10.6")
+            }
+        }
+    }
     repositories { google(); mavenCentral(); gradlePluginPortal() }
 }
 dependencyResolutionManagement {
@@ -997,7 +1053,7 @@ include(":app")
 org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
 android.useAndroidX=true
 kotlin.code.style=official
-systemProp.gradle.user.home=C:/Users/Anuskar/.gradle
+systemProp.gradle.user.home=C\:/Users/Anuskar/.gradle
 ```
 
 ## gradle/wrapper/gradle-wrapper.properties
@@ -1005,8 +1061,8 @@ systemProp.gradle.user.home=C:/Users/Anuskar/.gradle
 ```properties
 distributionBase=PROJECT
 distributionPath=.gradle/wrapper/dists
-distributionUrl=https\://services.gradle.org/distributions/gradle-8.9-bin.zip
-distributionSha256Sum=d725d707bfabd4dfdc958c624003b3c80accc03f7037b5122c4b1d0ef15cecab
+distributionUrl=https\://services.gradle.org/distributions/gradle-8.11.1-bin.zip
+distributionSha256Sum=f397b287023acdba1e9f6fc5ea72d22dd63669d59ed4a289a29b1a76eee151c6
 networkTimeout=120000
 validateDistributionUrl=true
 zipStoreBase=PROJECT
@@ -1017,8 +1073,7 @@ zipStorePath=.gradle/wrapper/dists
 
 ```xml
 <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
-    <path android:fillColor="#51D7B3" android:pathData="M12,2L3,6v6c0,5 4,8 9,10 5,-2 9,-5 9,-10V6z" />
-    <path android:strokeColor="#102820" android:strokeWidth="2" android:fillColor="#00000000" android:pathData="M7,12l3,3 7,-7" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M12,2L3,6v6c0,5 4,8 9,10 5,-2 9,-5 9,-10V6z" />
 </vector>
 ```
 
@@ -1181,7 +1236,9 @@ data class AppSettings(
     val allowedDomains: Set<String> = emptySet(),
     val blockedDomains: Set<String> = emptySet(),
     val keepRecentDomains: Boolean = false,
-    val enabledSubscriptions: Set<String> = emptySet()
+    val enabledSubscriptions: Set<String> = emptySet(),
+    val autoUpdateFilters: Boolean = true,
+    val notifyFilterUpdates: Boolean = true
 ) {
     fun save(context: Context) {
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit()
@@ -1192,7 +1249,9 @@ data class AppSettings(
             .putStringSet("allowedDomains", allowedDomains)
             .putStringSet("blockedDomains", blockedDomains)
             .putBoolean("keepRecentDomains", keepRecentDomains)
-            .putStringSet("enabledSubscriptions", enabledSubscriptions).apply()
+            .putStringSet("enabledSubscriptions", enabledSubscriptions)
+            .putBoolean("autoUpdateFilters", autoUpdateFilters)
+            .putBoolean("notifyFilterUpdates", notifyFilterUpdates).apply()
     }
 
     companion object {
@@ -1206,7 +1265,9 @@ data class AppSettings(
                 prefs.getStringSet("allowedDomains", emptySet())!!.toSet(),
                 prefs.getStringSet("blockedDomains", emptySet())!!.toSet(),
                 prefs.getBoolean("keepRecentDomains", false),
-                prefs.getStringSet("enabledSubscriptions", emptySet())!!.toSet()
+                prefs.getStringSet("enabledSubscriptions", emptySet())!!.toSet(),
+                prefs.getBoolean("autoUpdateFilters", true),
+                prefs.getBoolean("notifyFilterUpdates", true)
             )
         }
     }
@@ -1459,6 +1520,10 @@ class PrivateBrowserTest {
 package dev.still.dns
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.background
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.PrivacyTip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -1467,7 +1532,8 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun BrowseCard(connected: Boolean, onPrivate: () -> Unit, onOther: () -> Unit) {
     OutlinedCard {
-        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.surfaceContainer, MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)))).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Icon(Icons.Outlined.PrivacyTip, null, tint = MaterialTheme.colorScheme.primary)
             Text("Browse your way", style = MaterialTheme.typography.titleMedium)
             Button(onClick = onPrivate, modifier = Modifier.fillMaxWidth()) { Text("Open Still private browser") }
             Text("A fresh session with your filter rules. Leaving the private browser erases its cookies, website storage and browsing history. After a forced stop, cleanup runs before the next session.", style = MaterialTheme.typography.bodySmall)
@@ -1549,7 +1615,7 @@ fun FilterListsCard(library: FilterLibraryState, preferences: AppSettings,
     OutlinedCard {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Filter lists", style = MaterialTheme.typography.titleMedium)
-            Text("Add maintained domain lists to your protection level. Select a list, then download it. Updates are manual and saved lists work offline.", style = MaterialTheme.typography.bodySmall)
+            Text("Add maintained domain lists to your protection level. Selected lists update daily when automatic updates are enabled in Settings. You can also download them now. Saved lists work offline.", style = MaterialTheme.typography.bodySmall)
             if (!library.ready) LinearProgressIndicator(Modifier.fillMaxWidth())
             DownloadableFilter.entries.forEach { filter ->
                 val enabled = filter.name in preferences.enabledSubscriptions
@@ -1743,7 +1809,7 @@ class FilterRepository(
     suspend fun refresh(selected: Set<String>) {
         load()
         withContext(Dispatchers.IO) {
-            if (!mutex.tryLock()) return@withContext
+            mutex.lock()
             try {
                 mutable.value = mutable.value.copy(updating = true)
                 DownloadableFilter.entries.filter { it.name in selected }.forEach { filter ->
@@ -1820,6 +1886,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowForward
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1841,6 +1912,9 @@ class PrivateBrowserActivity : ComponentActivity() {
     private var address by mutableStateOf("")
     private var message by mutableStateOf<String?>(null)
     private var pageProgress by mutableIntStateOf(100)
+    private var pageTitle by mutableStateOf("")
+    private var canGoBack by mutableStateOf(false)
+    private var canGoForward by mutableStateOf(false)
     private var blocked by mutableIntStateOf(0)
     private var cleanupSupported = false
     private var sessionStarted = false
@@ -1873,10 +1947,11 @@ class PrivateBrowserActivity : ComponentActivity() {
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go, autoCorrectEnabled = false),
                             keyboardActions = KeyboardActions(onGo = { navigate() }),
                             trailingIcon = { TextButton(onClick = ::navigate, enabled = ready && !ending) { Text("Go") } })
+                        if (pageTitle.isNotBlank()) Text(pageTitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            TextButton(onClick = { browser?.let { if (it.canGoBack()) it.goBack() } }, enabled = ready && !ending) { Text("Back") }
-                            TextButton(onClick = { browser?.let { if (it.canGoForward()) it.goForward() } }, enabled = ready && !ending) { Text("Forward") }
-                            TextButton(onClick = { browser?.reload() }, enabled = ready && !ending) { Text("Reload") }
+                            IconButton(onClick = { browser?.goBack() }, enabled = ready && !ending && canGoBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") }
+                            IconButton(onClick = { browser?.goForward() }, enabled = ready && !ending && canGoForward) { Icon(Icons.AutoMirrored.Outlined.ArrowForward, "Forward") }
+                            IconButton(onClick = { browser?.reload() }, enabled = ready && !ending) { Icon(Icons.Outlined.Refresh, "Reload") }
                             Text("$blocked blocked", modifier = Modifier.align(Alignment.CenterVertically), style = MaterialTheme.typography.labelSmall)
                         }
                         Text("Leaving this screen ends and erases the session.", style = MaterialTheme.typography.labelSmall)
@@ -1939,6 +2014,7 @@ class PrivateBrowserActivity : ComponentActivity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(view, false)
         view.setDownloadListener { _, _, _, _, _ -> message = "Downloads are not saved in private sessions." }
         view.webChromeClient = object : WebChromeClient() {
+            override fun onReceivedTitle(view: WebView?, title: String?) { pageTitle = title.orEmpty().take(200) }
             override fun onProgressChanged(view: WebView?, newProgress: Int) { pageProgress = newProgress }
             override fun onPermissionRequest(request: PermissionRequest) { request.deny() }
             override fun onGeolocationPermissionsShowPrompt(origin: String?, callback: GeolocationPermissions.Callback?) {
@@ -1946,6 +2022,10 @@ class PrivateBrowserActivity : ComponentActivity() {
             }
         }
         view.webViewClient = object : WebViewClient() {
+            override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+                canGoBack = view.canGoBack()
+                canGoForward = view.canGoForward()
+            }
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 if (!BrowserNavigation.isWebUrl(request.url.toString())) {
                     message = "Only HTTPS pages open in this private session. External app links stay closed."
@@ -1962,6 +2042,7 @@ class PrivateBrowserActivity : ComponentActivity() {
                 return null
             }
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                pageTitle = ""
                 if (url != null && url != "about:blank") address = url
             }
             override fun onReceivedError(view: WebView?, request: WebResourceRequest, error: WebResourceError) {
@@ -2013,6 +2094,7 @@ class PrivateBrowserActivity : ComponentActivity() {
         }
         browser = null
         address = ""
+        pageTitle = ""
     }
 
     private fun closeAndErase() {
@@ -2462,4 +2544,613 @@ class ProtectionStoreTest {
         assertEquals(0, ProtectionStore.state.value.consecutiveFailures)
     }
 }
+```
+
+## scripts/New-StoreAssets.ps1
+
+```powershell
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+$assetDirectory = Join-Path (Split-Path $PSScriptRoot -Parent) 'store'
+function Draw-Shield($graphics, [single]$left, [single]$top, [single]$size) {
+    $saved = $graphics.Save()
+    $graphics.TranslateTransform($left, $top)
+    $graphics.ScaleTransform($size / 108, $size / 108)
+    $shield = [System.Drawing.Drawing2D.GraphicsPath]::new()
+    $shield.AddLines([System.Drawing.PointF[]]@([System.Drawing.PointF]::new(54,24),[System.Drawing.PointF]::new(30,34),[System.Drawing.PointF]::new(30,52)))
+    $shield.AddBezier(30,52,30,67,40,77,54,84)
+    $shield.AddBezier(54,84,68,77,78,67,78,52)
+    $shield.AddLines([System.Drawing.PointF[]]@([System.Drawing.PointF]::new(78,52),[System.Drawing.PointF]::new(78,34),[System.Drawing.PointF]::new(54,24)))
+    $shield.CloseFigure()
+    $gradient = [System.Drawing.Drawing2D.LinearGradientBrush]::new([System.Drawing.Point]::new(30,24),[System.Drawing.Point]::new(78,84),[System.Drawing.ColorTranslator]::FromHtml('#82F2C5'),[System.Drawing.ColorTranslator]::FromHtml('#54B8D2'))
+    $graphics.FillPath($gradient, $shield)
+    $pen = [System.Drawing.Pen]::new([System.Drawing.ColorTranslator]::FromHtml('#123B36'),5)
+    $pen.StartCap = $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+    $graphics.DrawLines($pen,[System.Drawing.PointF[]]@([System.Drawing.PointF]::new(42,53),[System.Drawing.PointF]::new(50,61),[System.Drawing.PointF]::new(66,44)))
+    $pen.Dispose(); $gradient.Dispose(); $shield.Dispose()
+    $graphics.Restore($saved)
+}
+foreach ($kind in @('icon','feature')) {
+    $width = if ($kind -eq 'icon') { 512 } else { 1024 }
+    $height = if ($kind -eq 'icon') { 512 } else { 500 }
+    $bitmap = [System.Drawing.Bitmap]::new($width,$height)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $graphics.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+    $graphics.Clear([System.Drawing.ColorTranslator]::FromHtml('#0D2428'))
+    if ($kind -eq 'icon') { Draw-Shield $graphics 0 0 512 }
+    else {
+        Draw-Shield $graphics 28 72 356
+        $titleFont = [System.Drawing.Font]::new('Segoe UI',72,[System.Drawing.FontStyle]::Bold,[System.Drawing.GraphicsUnit]::Pixel)
+        $bodyFont = [System.Drawing.Font]::new('Segoe UI',29,[System.Drawing.FontStyle]::Regular,[System.Drawing.GraphicsUnit]::Pixel)
+        $brush = [System.Drawing.SolidBrush]::new([System.Drawing.ColorTranslator]::FromHtml('#F0F5F3'))
+        $graphics.DrawString('still',$titleFont,$brush,420,130)
+        $graphics.DrawString("Local DNS filtering.`nYour rules. Your control.",$bodyFont,$brush,425,245)
+        $titleFont.Dispose(); $bodyFont.Dispose(); $brush.Dispose()
+    }
+    $bitmap.Save((Join-Path $assetDirectory "$kind.png"),[System.Drawing.Imaging.ImageFormat]::Png)
+    $graphics.Dispose(); $bitmap.Dispose()
+}
+```
+
+## scripts/New-ReleaseKey.ps1
+
+```powershell
+param([string]$Keytool = 'keytool')
+$ErrorActionPreference = 'Stop'
+$projectRoot = Split-Path $PSScriptRoot -Parent
+$signingDirectory = Join-Path $projectRoot 'signing'
+$keyPath = Join-Path $signingDirectory 'still-release.jks'
+$propertiesPath = Join-Path $signingDirectory 'release.properties'
+if ((Test-Path -LiteralPath $keyPath) -or (Test-Path -LiteralPath $propertiesPath)) {
+    throw 'Signing material already exists. It will not be overwritten.'
+}
+New-Item -ItemType Directory -Path $signingDirectory -Force | Out-Null
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+& icacls $signingDirectory /inheritance:r /grant:r "${identity}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Could not restrict signing directory permissions.' }
+$random = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($random)
+$env:STILL_KEY_PASSWORD = [Convert]::ToBase64String($random)
+try {
+    & $Keytool -genkeypair -noprompt -keystore $keyPath -storetype JKS -alias still -keyalg RSA -keysize 2048 -validity 10000 -storepass:env STILL_KEY_PASSWORD -keypass:env STILL_KEY_PASSWORD -dname 'CN=Still Android Release'
+    if ($LASTEXITCODE -ne 0) { throw 'Key generation failed.' }
+    @("storeFile=signing/still-release.jks", "storePassword=$env:STILL_KEY_PASSWORD", 'keyAlias=still', "keyPassword=$env:STILL_KEY_PASSWORD") | Set-Content -LiteralPath $propertiesPath -Encoding ascii
+} finally { Remove-Item Env:STILL_KEY_PASSWORD -ErrorAction SilentlyContinue }
+Write-Output 'Release signing material created in signing/. Back up this folder securely. Do not publish it.'
+```
+
+## app/src/test/java/dev/still/dns/LifetimeCounterTest.kt
+
+```kotlin
+package dev.still.dns
+
+import org.junit.Assert.*
+import org.junit.Test
+import kotlin.concurrent.thread
+
+class LifetimeCounterTest {
+    @Test fun resumesSavedTotalsAndCountsBothAllowedAndBlockedQueries() {
+        var saved = LifetimeTotals(10, 20)
+        val counter = LifetimeCounter(saved) { saved = it }
+        counter.record(false)
+        counter.record(true)
+        assertEquals(LifetimeTotals(11, 22), saved)
+        val reopened = LifetimeCounter(saved) { saved = it }
+        reopened.record(true)
+        assertEquals(LifetimeTotals(12, 23), reopened.state.value)
+    }
+
+    @Test fun concurrentEventsAreNotLost() {
+        var saved = LifetimeTotals()
+        val counter = LifetimeCounter(saved) { saved = it }
+        val threads = List(4) { thread { repeat(500) { counter.record(it % 2 == 0) } } }
+        threads.forEach { it.join() }
+        assertEquals(LifetimeTotals(1000, 2000), saved)
+        assertEquals(saved, counter.state.value)
+    }
+
+    @Test fun sessionResetDoesNotChangeLifetimeTotals() {
+        val counter = LifetimeCounter(LifetimeTotals(5, 15)) { }
+        ProtectionStore.update { it.copy(blocked = 0, queries = 0) }
+        assertEquals(LifetimeTotals(5, 15), counter.state.value)
+    }
+
+    @Test fun totalsNeverOverflowToNegative() {
+        val counter = LifetimeCounter(LifetimeTotals(Long.MAX_VALUE, Long.MAX_VALUE)) { }
+        counter.record(true)
+        assertEquals(LifetimeTotals(Long.MAX_VALUE, Long.MAX_VALUE), counter.state.value)
+    }
+}
+```
+
+## app/src/main/res/values/styles.xml
+
+```xml
+<resources>
+    <style name="StillLicensesTheme" parent="Theme.AppCompat.DayNight.DarkActionBar">
+        <item name="colorPrimary">#0D2428</item>
+        <item name="colorAccent">#006D53</item>
+    </style>
+</resources>
+```
+
+## app/src/main/res/mipmap-anydpi-v33/ic_launcher.xml
+
+```xml
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>
+```
+
+## app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+
+```xml
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>
+```
+
+## app/src/main/res/drawable/ic_shield_outline.xml
+
+```xml
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="#00000000" android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:pathData="M12,3L4,6.5V12c0,4 3.5,7 8,9 4.5,-2 8,-5 8,-9V6.5z" />
+</vector>
+```
+
+## app/src/main/res/drawable/ic_launcher_foreground.xml
+
+```xml
+<vector xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:pathData="M54,24L30,34V52C30,67 40,77 54,84C68,77 78,67 78,52V34Z">
+        <aapt:attr name="android:fillColor"><gradient android:startX="30" android:startY="24" android:endX="78" android:endY="84" android:type="linear"><item android:offset="0" android:color="#82F2C5" /><item android:offset="1" android:color="#54B8D2" /></gradient></aapt:attr>
+    </path>
+    <path android:fillColor="#00000000" android:strokeColor="#123B36" android:strokeWidth="5" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M42,53L50,61L66,44" />
+</vector>
+```
+
+## app/src/main/res/drawable/ic_launcher_background.xml
+
+```xml
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="#0D2428" />
+</shape>
+```
+
+## app/src/main/java/dev/still/dns/StillTileService.kt
+
+```kotlin
+package dev.still.dns
+
+import android.app.PendingIntent
+import android.content.Intent
+import android.graphics.drawable.Icon
+import android.net.VpnService
+import android.os.Build
+import android.service.quicksettings.Tile
+import android.service.quicksettings.TileService
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.*
+
+class StillTileService : TileService() {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var observer: Job? = null
+
+    override fun onStartListening() {
+        super.onStartListening()
+        observer?.cancel()
+        observer = scope.launch { ProtectionStore.state.collect { render(it) } }
+    }
+
+    private fun render(state: ProtectionState) {
+        qsTile?.apply {
+            label = "Still DNS"
+            this.state = if (state.connection == Connection.Disconnected) Tile.STATE_INACTIVE else Tile.STATE_ACTIVE
+            icon = Icon.createWithResource(this@StillTileService,
+                if (state.connected) R.drawable.ic_shield else R.drawable.ic_shield_outline)
+            contentDescription = when (state.connection) {
+                Connection.Connected -> "Still DNS on. Tap to turn off."
+                Connection.Connecting -> "Still DNS connecting. Tap to cancel."
+                Connection.Disconnected -> "Still DNS off. Tap to turn on."
+            }
+            if (Build.VERSION.SDK_INT >= 29) subtitle = when (state.connection) {
+                Connection.Connected -> "On"
+                Connection.Connecting -> "Connecting"
+                Connection.Disconnected -> "Off"
+            }
+            updateTile()
+        }
+    }
+
+    override fun onClick() {
+        super.onClick()
+        if (isLocked) unlockAndRun { toggle() } else toggle()
+    }
+
+    private fun toggle() {
+        try {
+            if (ProtectionStore.state.value.connection != Connection.Disconnected) {
+                startService(Intent(this, AdBlockerService::class.java).setAction(AdBlockerService.STOP))
+            } else if (!getSharedPreferences("onboarding", MODE_PRIVATE).getBoolean("vpnDisclosureAccepted", false) || VpnService.prepare(this) != null) {
+                openDashboard()
+            } else {
+                ProtectionStore.update { it.copy(connection = Connection.Connecting, error = null) }
+                ContextCompat.startForegroundService(this, Intent(this, AdBlockerService::class.java))
+            }
+        } catch (_: Exception) {
+            ProtectionStore.update { it.copy(connection = Connection.Disconnected, error = "Open Still to start protection.") }
+            openDashboard()
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    @android.annotation.SuppressLint("StartActivityAndCollapseDeprecated") // Intent overload is required below API 34; guarded below.
+    private fun openDashboard() {
+        val intent = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        if (Build.VERSION.SDK_INT >= 34) startActivityAndCollapse(PendingIntent.getActivity(this, 3, intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+        else startActivityAndCollapse(intent)
+    }
+
+    override fun onStopListening() { observer?.cancel(); super.onStopListening() }
+    override fun onDestroy() { scope.cancel(); super.onDestroy() }
+}
+```
+
+## app/src/main/java/dev/still/dns/SettingsScreen.kt
+
+```kotlin
+package dev.still.dns
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material3.*
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.dp
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsScreen(state: ProtectionState, preferences: AppSettings, onSettingsChange: (AppSettings) -> Unit,
+    onToggle: () -> Unit, onResetStatistics: () -> Unit, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    Scaffold(topBar = { TopAppBar(title = { Text("Settings") }, navigationIcon = {
+        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") }
+    }) }) { insets ->
+        Column(Modifier.fillMaxSize().padding(insets).verticalScroll(rememberScrollState()).padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            SettingSwitch("Protection", state.connection != Connection.Disconnected) { onToggle() }
+            Text("Appearance", style = MaterialTheme.typography.titleMedium)
+            Appearance.entries.forEach { appearance ->
+                SettingChoice(appearance.name, preferences.appearance == appearance) { onSettingsChange(preferences.copy(appearance = appearance)) }
+            }
+            if (android.os.Build.VERSION.SDK_INT >= 31) SettingSwitch("Use device colors", preferences.dynamicColors) {
+                onSettingsChange(preferences.copy(dynamicColors = it))
+            }
+            HorizontalDivider()
+            Text("DNS resolver", style = MaterialTheme.typography.titleMedium)
+            Text("Turn protection off to change the resolver. Queries are sent unencrypted.")
+            DnsProvider.entries.forEach { provider ->
+                SettingChoice("${provider.name} (${provider.address})", preferences.dnsProvider == provider,
+                    state.connection == Connection.Disconnected) { onSettingsChange(preferences.copy(dnsProvider = provider)) }
+            }
+            HorizontalDivider()
+            Text("Filter updates", style = MaterialTheme.typography.titleMedium)
+            SettingSwitch("Update enabled lists daily", preferences.autoUpdateFilters) { onSettingsChange(preferences.copy(autoUpdateFilters = it)) }
+            SettingSwitch("Notify when lists update", preferences.notifyFilterUpdates) { onSettingsChange(preferences.copy(notifyFilterUpdates = it)) }
+            Text("Updates need internet access and run when Android allows background work. Enable lists on the dashboard. Failed updates keep the last valid list.")
+            HorizontalDivider()
+            Text("Statistics", style = MaterialTheme.typography.titleMedium)
+            TextButton(onClick = onResetStatistics) { Text("Reset session statistics") }
+            Text("All-time totals remain on this device until app storage is cleared or Still is uninstalled. They count DNS requests, not individual ads. Data savings are estimates.")
+            Text("Quick Settings", style = MaterialTheme.typography.titleMedium)
+            Text("Edit your phone's Quick Settings panel and add Still DNS. The tile toggles protection; the first connection needs permission in the app.")
+            Text("Limits", style = MaterialTheme.typography.titleMedium)
+            Text("DNS filtering cannot reliably remove ads served from the same domains as content, including YouTube video ads. Private DNS and app-specific encrypted DNS may bypass filtering. Android allows only one active VPN.")
+        }
+    }
+}
+
+@Composable
+private fun SettingSwitch(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, modifier = Modifier.weight(1f))
+        Switch(checked, onChange, modifier = Modifier.semantics { contentDescription = label })
+    }
+}
+
+@Composable
+private fun SettingChoice(label: String, selected: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).selectable(selected, enabled, Role.RadioButton, onClick), verticalAlignment = Alignment.CenterVertically) {
+        RadioButton(selected, onClick = null, enabled = enabled)
+        Spacer(Modifier.width(12.dp))
+        Text(label)
+    }
+}
+```
+
+## app/src/main/java/dev/still/dns/OnboardingActivity.kt
+
+```kotlin
+package dev.still.dns
+
+import android.content.Intent
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+
+class OnboardingActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent {
+            StillTheme(AppSettings.load(this)) {
+                val pager = rememberPagerState { 3 }
+                val scope = rememberCoroutineScope()
+                Scaffold { insets ->
+                    Column(Modifier.fillMaxSize().padding(insets).padding(24.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("still", style = MaterialTheme.typography.headlineMedium)
+                            TextButton(onClick = ::finishOnboarding) { Text("Skip") }
+                        }
+                        HorizontalPager(pager, modifier = Modifier.weight(1f)) { page ->
+                            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(vertical = 32.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(24.dp)) {
+                                val pulse = rememberInfiniteTransition(label = "welcome")
+                                val scale by pulse.animateFloat(0.95f, 1.05f, infiniteRepeatable(tween(1600), RepeatMode.Reverse), label = "shield")
+                                Icon(Icons.Outlined.Shield, null, Modifier.size(112.dp).scale(scale), tint = MaterialTheme.colorScheme.primary)
+                                Text(listOf("A quieter internet.", "Local filtering. Clear limits.", "You're in control.")[page],
+                                    style = MaterialTheme.typography.headlineLarge, textAlign = TextAlign.Center)
+                                Text(listOf(
+                                    "Still filters known ad and tracking domains. No account is needed. Choose the lists and rules that work for you.",
+                                    "Still uses Android's VPN permission to inspect DNS names on this device. Allowed queries are sent unencrypted to your selected DNS provider. Websites and filter downloads also use the internet. Still does not hide your IP address or encrypt browsing traffic.",
+                                    "Turn protection on or off at any time. Add Still DNS to Quick Settings for faster access. Enabled filter lists can update daily. Read the privacy policy in About before you start."
+                                )[page], style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center)
+                            }
+                        }
+                        Text("${pager.currentPage + 1} of 3", modifier = Modifier.align(Alignment.CenterHorizontally))
+                        Spacer(Modifier.height(16.dp))
+                        Button(onClick = {
+                            if (pager.currentPage == 2) finishOnboarding()
+                            else scope.launch { pager.animateScrollToPage(pager.currentPage + 1) }
+                        }, modifier = Modifier.fillMaxWidth()) { Text(if (pager.currentPage == 2) "Get started" else "Next") }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun finishOnboarding() {
+        getSharedPreferences("onboarding", MODE_PRIVATE).edit().putBoolean("complete", true).apply()
+        startActivity(Intent(this, MainActivity::class.java))
+        finish()
+    }
+}
+```
+
+## app/src/main/java/dev/still/dns/LifetimeStatistics.kt
+
+```kotlin
+package dev.still.dns
+
+import android.content.Context
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+data class LifetimeTotals(val blocked: Long = 0, val queries: Long = 0)
+
+/** A single writer prevents lost updates and stale settings from resetting totals. */
+class LifetimeCounter(initial: LifetimeTotals, private val persist: (LifetimeTotals) -> Unit) {
+    private val mutable = MutableStateFlow(initial)
+    val state = mutable.asStateFlow()
+
+    @Synchronized fun record(blocked: Boolean) {
+        val old = mutable.value
+        val next = LifetimeTotals(
+            if (blocked && old.blocked < Long.MAX_VALUE) old.blocked + 1 else old.blocked,
+            if (old.queries < Long.MAX_VALUE) old.queries + 1 else old.queries
+        )
+        persist(next)
+        mutable.value = next
+    }
+}
+
+object LifetimeStatistics {
+    @Volatile private var instance: LifetimeCounter? = null
+    fun get(context: Context): LifetimeCounter = instance ?: synchronized(this) {
+        instance ?: run {
+            val prefs = context.applicationContext.getSharedPreferences("lifetime-statistics", Context.MODE_PRIVATE)
+            LifetimeCounter(LifetimeTotals(prefs.getLong("blocked", 0), prefs.getLong("queries", 0))) {
+                prefs.edit().putLong("blocked", it.blocked).putLong("queries", it.queries).apply()
+            }.also { instance = it }
+        }
+    }
+}
+```
+
+## app/src/main/java/dev/still/dns/FilterUpdateWorker.kt
+
+```kotlin
+package dev.still.dns
+
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import androidx.work.*
+import java.util.concurrent.TimeUnit
+
+class FilterUpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    override suspend fun doWork(): Result {
+        val settings = AppSettings.load(applicationContext)
+        val selected = DownloadableFilter.entries.filter { it.name in settings.enabledSubscriptions }
+        if (!settings.autoUpdateFilters || selected.isEmpty()) return Result.success()
+        val repository = FilterLibrary.get(applicationContext)
+        repository.refresh(selected.map { it.name }.toSet())
+        val entries = repository.state.value.entries
+        if (selected.any { entries[it]?.list == null || entries[it]?.error != null }) return Result.retry()
+        if (settings.notifyFilterUpdates) notifyUpdated()
+        return Result.success()
+    }
+
+    private fun notifyUpdated() {
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(applicationContext,
+                Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
+        val manager = applicationContext.getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(NotificationChannel("filter-updates", "Filter updates", NotificationManager.IMPORTANCE_LOW))
+        val open = PendingIntent.getActivity(applicationContext, 2, Intent(applicationContext, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        manager.notify(2, NotificationCompat.Builder(applicationContext, "filter-updates")
+            .setSmallIcon(R.drawable.ic_shield).setContentTitle("Filter lists updated")
+            .setContentText("Your enabled DNS lists are ready.").setContentIntent(open).setAutoCancel(true).build())
+    }
+
+    companion object {
+        fun schedule(context: Context, settings: AppSettings) {
+            val manager = WorkManager.getInstance(context)
+            if (!settings.autoUpdateFilters || settings.enabledSubscriptions.isEmpty()) {
+                manager.cancelUniqueWork("daily-filter-update")
+                return
+            }
+            val request = PeriodicWorkRequestBuilder<FilterUpdateWorker>(1, TimeUnit.DAYS)
+                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS).build()
+            manager.enqueueUniquePeriodicWork("daily-filter-update", ExistingPeriodicWorkPolicy.UPDATE, request)
+        }
+    }
+}
+```
+
+## app/src/main/java/dev/still/dns/AboutScreen.kt
+
+```kotlin
+package dev.still.dns
+
+import android.content.Intent
+import android.net.Uri
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import com.google.android.gms.oss.licenses.OssLicensesMenuActivity
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AboutScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    var privacy by rememberSaveable { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    BackHandler { if (privacy) privacy = false else onBack() }
+    fun open(url: String) {
+        try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+        catch (_: android.content.ActivityNotFoundException) { error = "No app is available to open this link." }
+    }
+    Scaffold(topBar = { TopAppBar(title = { Text(if (privacy) "Privacy policy" else "About Still") },
+        navigationIcon = { IconButton(onClick = { if (privacy) privacy = false else onBack() }) {
+            Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back")
+        } }) }) { insets ->
+        Column(Modifier.fillMaxSize().padding(insets).verticalScroll(rememberScrollState()).padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp)) {
+            if (privacy) {
+                val policy = remember { context.assets.open("privacy-policy.txt").bufferedReader().use { it.readText() } }
+                Text(policy, style = MaterialTheme.typography.bodyLarge)
+            } else {
+                Text("Still", style = MaterialTheme.typography.displaySmall)
+                Text("Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+                Text("DNS rules are checked on this device. No account or developer-operated analytics service is used. Allowed DNS queries go to your selected resolver.")
+                TextButton(onClick = { privacy = true }) { Text("Privacy policy") }
+                TextButton(onClick = { open("https://github.com/Anuskar123/still-ad-blocker") }) { Text("GitHub source") }
+                Text("Filter list credits", style = MaterialTheme.typography.titleMedium)
+                Text("Optional HaGeZi Multi LIGHT and TIF Mini lists are downloaded from HaGeZi's DNS blocklists repository. The project distributes these lists under GPL-3.0. Source and licence are available below.")
+                TextButton(onClick = { open("https://github.com/hagezi/dns-blocklists") }) { Text("HaGeZi filter lists and credits") }
+                TextButton(onClick = { open("https://github.com/hagezi/dns-blocklists/blob/main/LICENSE") }) { Text("Filter list licence") }
+                TextButton(onClick = { context.startActivity(Intent(context, OssLicensesMenuActivity::class.java)) }) { Text("Open source licences") }
+                TextButton(onClick = { open("https://play.google.com/store/apps/details?id=${BuildConfig.APPLICATION_ID}") }) { Text("Rate on Google Play") }
+                Text("The store page will be available after Still is published.", style = MaterialTheme.typography.bodySmall)
+            }
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        }
+    }
+}
+```
+
+## app/src/main/assets/privacy-policy.txt
+
+```text
+Still privacy policy
+Effective date: 16 September 2026
+
+Still is maintained by the owner of the Anuskar123/still-ad-blocker GitHub repository. For privacy questions, contact the maintainer through that repository. Do not post browsing history or other sensitive information in a public issue.
+
+Local DNS filtering
+Still uses Android's VPN interface to inspect DNS requests and compare domain names with rules stored on your device. It does not route all browsing traffic through a developer-operated VPN server. Still does not hide your IP address or provide an encrypted VPN connection.
+
+Information sent over the network
+Allowed DNS queries are sent unencrypted to the DNS provider you select: Google, Cloudflare or Quad9. That provider and your network operator may observe these queries and your IP address. Optional filter downloads connect over HTTPS to GitHub's content servers, which receive ordinary connection information such as your IP address. Websites you visit and search providers receive your requests. These services have their own privacy policies.
+
+Information kept on your device
+Still stores preferences, custom domain rules, downloaded filter lists and aggregate lifetime query/block counts locally. Session totals and optional recent-domain history are held in memory. Recent-domain history is off by default and limited to the most recent 30 distinct domains. Turning it off or using Clear history removes the visible history. The private browser suppresses new recent-domain recording during its session.
+
+Private browser
+The private browser uses Android System WebView. Leaving it clears cookies, website storage and browsing history; after a forced stop, cleanup runs before the next session. Still blocks private browsing when WebView cannot perform the required cleanup. Visited sites and the search provider still receive network requests. Private browsing does not make you anonymous to websites, your network or DNS providers.
+
+Background updates and notifications
+When enabled, selected filter lists update approximately daily when Android permits background work and internet access is available. Disable automatic updates or update notifications in Settings. Protection uses a foreground notification while running.
+
+Developer collection
+Still has no account system, advertising SDK or developer-operated analytics endpoint. The app does not send browsing history, domain logs, or aggregate statistics to the developer. Android, your app store, WebView, DNS providers and visited sites may process information under their own policies.
+
+Your controls
+Turn off protection in the app, notification or Quick Settings tile. Change rules or clear recent history in the dashboard. Reset session counts in Settings. Clear Still's app storage or uninstall it to delete local preferences, rules, downloaded filters and lifetime totals. Android backup is disabled.
+
+Children and general browsing
+Still is a general-purpose utility with a browser that can access the open web. Threat lists are not parental controls and do not guarantee that content is safe or suitable for children.
+
+Changes
+This policy should be updated when app behavior or data practices change. Review the policy included with the app version you use.
 ```

@@ -20,7 +20,7 @@ fun FilterListsCard(library: FilterLibraryState, preferences: AppSettings,
     OutlinedCard {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Filter lists", style = MaterialTheme.typography.titleMedium)
-            Text("Add maintained domain lists to your protection level. Select a list, then download it. Updates are manual and saved lists work offline.", style = MaterialTheme.typography.bodySmall)
+            Text("Add maintained domain lists to your protection level. Selected lists update daily when automatic updates are enabled in Settings. You can also download them now. Saved lists work offline.", style = MaterialTheme.typography.bodySmall)
             if (!library.ready) LinearProgressIndicator(Modifier.fillMaxWidth())
             DownloadableFilter.entries.forEach { filter ->
                 val enabled = filter.name in preferences.enabledSubscriptions
