@@ -15,3 +15,8 @@ signing/
 dist/
 .env
 .env.*
+platforms/windows/bin/
+platforms/windows/obj/
+platforms/apple/*.xcodeproj/
+platforms/apple/DerivedData/
+__pycache__/

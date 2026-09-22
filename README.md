@@ -1,5 +1,11 @@
 # Still
 
+## Other devices
+
+[Download the cross-device package](https://github.com/Anuskar123/still-ad-blocker/releases/download/companions-v0.1.0/Still-Cross-Device.zip) or choose individual files from the [companion preview release](https://github.com/Anuskar123/still-ad-blocker/releases/tag/companions-v0.1.0).
+
+The existing app below is Android-only. New Windows DNS companions, an Apple DNS configuration profile, and native Apple companion source are in [`platforms/`](platforms/README.md). Windows and Apple use AdGuard Public DNS and do not have Android's custom rules, filter subscriptions, private browser or counters. Apple app builds and Apple device validation remain outstanding. See the platform guide for exact compatibility and installation instructions.
+
 ## Version 2.1 filter expansion
 
 The local 2.1 build offers eight optional HaGeZi lists: Multi Light, Pro Mini, Pro++ Mini, TIF Mini, fake sites, pop-up ad domains, Gambling Mini and adult domains. Pick one Multi tier plus optional categories. Existing selections are preserved, and selecting another Multi tier replaces only the previous tier. Stronger tiers can break services; content categories are not guaranteed parental controls.

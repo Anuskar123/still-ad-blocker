@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadType</key>
+			<string>com.apple.dnsSettings.managed</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>PayloadIdentifier</key>
+			<string>dev.still.dns.profile.settings</string>
+			<key>PayloadUUID</key>
+			<string>b983755a-f889-4c1e-8a65-2d4fdb2c9286</string>
+			<key>PayloadDisplayName</key>
+			<string>Still - AdGuard Public DNS</string>
+			<key>PayloadDescription</key>
+			<string>Sends DNS queries to AdGuard Public DNS over HTTPS to filter ads and trackers. Does not reliably block YouTube video ads.</string>
+			<key>DNSSettings</key>
+			<dict>
+				<key>DNSProtocol</key>
+				<string>HTTPS</string>
+				<key>ServerURL</key>
+				<string>https://dns.adguard-dns.com/dns-query</string>
+				<key>ServerAddresses</key>
+				<array>
+					<string>94.140.14.14</string>
+					<string>94.140.15.15</string>
+					<string>2a10:50c0::ad1:ff</string>
+					<string>2a10:50c0::ad2:ff</string>
+				</array>
+			</dict>
+			<key>OnDemandRules</key>
+			<array>
+				<dict>
+					<key>Action</key>
+					<string>Connect</string>
+				</dict>
+			</array>
+			<key>ProhibitDisablement</key>
+			<false/>
+		</dict>
+	</array>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+	<key>PayloadIdentifier</key>
+	<string>dev.still.dns.profile</string>
+	<key>PayloadUUID</key>
+	<string>f7caa11b-42e4-432b-af09-f6a1fab66ceb</string>
+	<key>PayloadDisplayName</key>
+	<string>Still - filtering DNS</string>
+	<key>PayloadDescription</key>
+	<string>Encrypted DNS using AdGuard Public DNS. This is a DNS configuration, not the Android app. No custom Still rules or counters. See https://adguard-dns.io/en/privacy.html. Remove this profile to undo the configuration.</string>
+	<key>PayloadOrganization</key>
+	<string>Still (independent of AdGuard)</string>
+	<key>PayloadRemovalDisallowed</key>
+	<false/>
+	<key>ConsentText</key>
+	<dict>
+		<key>default</key>
+		<string>This profile sends DNS queries to AdGuard's public filtering resolver over HTTPS. AdGuard operates the resolver and controls its blocklists. Still does not collect DNS logs. Some VPNs and apps can bypass DNS filtering. Internal network names may stop resolving. You can remove this profile in Settings. No certificates, VPN tunnel or device management enrolment are installed.</string>
+	</dict>
+</dict>
+</plist>
