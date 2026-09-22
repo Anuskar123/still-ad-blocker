@@ -38,4 +38,16 @@ object FilterPolicy {
         require(!domain.all { it.isDigit() || it == '.' })
         domain
     }.getOrNull()
+
+    /** Uses the same precedence as live filtering; performs no network lookup. */
+    fun explain(domain: String, settings: AppSettings, library: FilterLibraryState): String {
+        if (PacketParser.blocked(domain, settings.allowedDomains)) return "Allowed by your allow rule. Allow rules override all blocklists."
+        if (PacketParser.blocked(domain, settings.blockedDomains)) return "Blocked by your custom block rule."
+        if (PacketParser.blocked(domain, rules(settings.protectionLevel))) return "Blocked by the built-in ${settings.protectionLevel.title} rules."
+        val matches = DownloadableFilter.entries.filter { it.name in settings.enabledSubscriptions && library.entries[it]?.list?.matches(domain) == true }
+        if (matches.isNotEmpty()) return "Blocked by: " + matches.joinToString { it.title }
+        val missing = DownloadableFilter.entries.any { it.name in settings.enabledSubscriptions && library.entries[it]?.list == null }
+        return if (missing) "No match in available rules. Some selected lists have not been downloaded."
+        else "No block rule matches. This does not establish that the site is safe."
+    }
 }

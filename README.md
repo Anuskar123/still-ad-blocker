@@ -1,16 +1,22 @@
 # Still
 
+## Version 2.1 filter expansion
+
+The local 2.1 build offers eight optional HaGeZi lists: Multi Light, Pro Mini, Pro++ Mini, TIF Mini, fake sites, pop-up ad domains, Gambling Mini and adult domains. Pick one Multi tier plus optional categories. Existing selections are preserved, and selecting another Multi tier replaces only the previous tier. Stronger tiers can break services; content categories are not guaranteed parental controls.
+
+The filter catalogue includes search and selected/downloaded counts. Check a domain locally to see custom-rule, built-in or subscription matches, including allow-rule precedence and missing-download status. No query is sent to a lookup service. Live DNS and private-browser filtering use the selected lists.
+
 ## Version 2.0
 
-Still 2.0 adds first-launch onboarding, persistent lifetime DNS totals, a Quick Settings tile, automatic daily filter updates, full Settings and About screens, adaptive launcher artwork and signed, optimized release builds. See [release instructions](RELEASE.md), [validation](VALIDATION.md) and [privacy policy](app/src/main/assets/privacy-policy.txt). Live filter downloading stalled in the latest phone test and remains unverified on that connection.
+Still 2.0 adds first-launch onboarding, persistent lifetime DNS totals, a Quick Settings tile, automatic daily filter updates, full Settings and About screens, adaptive launcher artwork and signed, optimized release builds. See [release instructions](RELEASE.md), [validation](VALIDATION.md) and [privacy policy](app/src/main/assets/privacy-policy.txt). Live filter downloading is verified on an Infinix X6878. Large lists can take more than a minute on a mobile connection, so version 2.1 shows the current list and progress while downloading.
 
 ## Download for Android
 
-[Update existing Still installations to 2.0](https://github.com/Anuskar123/still-ad-blocker/releases/download/v2.0/Still-2.0-debug-update.apk)
+[Update existing Still installations to 2.1](https://github.com/Anuskar123/still-ad-blocker/releases/download/v2.1/Still-2.1-debug-update.apk)
 
 Open this link on your Android phone, download the APK, and open it to install or update Still. Android may ask you to allow installation from your browser. This is a debug-signed testing build for Android 8.0 or newer; private browsing also requires a compatible, updated Android System WebView.
 
-[Download the optimized 2.0 release APK for a fresh installation](https://github.com/Anuskar123/still-ad-blocker/releases/download/v2.0/Still-2.0-release.apk). This uses a different signing key and cannot replace the earlier debug-signed app. Use the update APK above to retain your existing installation and data.
+[Download the optimized 2.1 release APK for a fresh installation](https://github.com/Anuskar123/still-ad-blocker/releases/download/v2.1/Still-2.1-release.apk). This uses a different signing key and cannot replace the earlier debug-signed app. Use the update APK above to retain your existing installation and data.
 
 [Release notes and APK checksums](https://github.com/Anuskar123/still-ad-blocker/releases/tag/v2.0)
 

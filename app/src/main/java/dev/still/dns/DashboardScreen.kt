@@ -136,6 +136,7 @@ fun DashboardScreen(
                 }
                 BrowseCard(state.connected, onOpenPrivateBrowser, onOpenOtherBrowser)
                 FilterListsCard(filterLibrary, preferences, onSettingsChange, onUpdateFilters)
+                DomainCheckCard(preferences, filterLibrary)
                 HorizontalDivider(color = colors.outlineVariant)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Icon(Icons.Outlined.Lock, null, tint = colors.onSurfaceVariant, modifier = Modifier.size(18.dp))

@@ -3,8 +3,11 @@ package dev.still.dns
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.URL
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import javax.net.ssl.SSLException
 import javax.net.ssl.HttpsURLConnection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,11 +16,23 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-enum class DownloadableFilter(val title: String, val detail: String, val fileName: String) {
-    AdsTrackers("Ads and trackers", "HaGeZi Multi LIGHT: a compact list for advertising and tracking domains.", "light.txt"),
-    Threats("Threat domains", "HaGeZi TIF Mini: domains listed for threats such as phishing and malware. Not a guarantee of safety.", "tif.mini.txt");
+enum class DownloadableFilter(val title: String, val detail: String, val fileName: String, val mainList: Boolean = false) {
+    AdsTrackers("Multi Light", "Relaxed ad and tracker filtering. Lowest risk of breaking sites.", "light.txt", true),
+    ProMini("Multi Pro Mini", "Compact, broader ad and tracker coverage. Some services may need allow rules.", "pro.mini.txt", true),
+    ProPlusMini("Multi Pro++ Mini", "More aggressive tracking protection. Higher risk of breaking app and website features.", "pro.plus.mini.txt", true),
+    Threats("Threat domains", "HaGeZi TIF Mini: phishing and malware domains. Not a guarantee of safety.", "tif.mini.txt"),
+    FakeSites("Fake and scam sites", "Domains associated with fake shops, scams and deceptive sites.", "fake.txt"),
+    Popups("Pop-up ad domains", "Blocks known pop-up advertising domains, not page elements or all pop-up windows.", "popupads.txt"),
+    Gambling("Gambling domains", "Gambling Mini: optionally restrict known gambling sites. Not comprehensive parental control.", "gambling.mini.txt"),
+    AdultContent("Adult domains", "Optionally restrict listed adult sites. May block legitimate content and can be bypassed.", "nsfw.txt");
 
     val url get() = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/$fileName"
+
+    fun select(enabled: Set<String>, selected: Boolean): Set<String> {
+        if (!selected) return enabled - name
+        val remaining = if (mainList) enabled - entries.filter { it.mainList }.map { it.name }.toSet() else enabled
+        return remaining + name
+    }
 }
 
 data class DomainList(val domains: Set<String>, val version: String) {
@@ -67,6 +82,9 @@ data class FilterEntry(val list: DomainList? = null, val downloadedAt: Long = 0,
 data class FilterLibraryState(
     val ready: Boolean = false,
     val updating: Boolean = false,
+    val activeFilter: DownloadableFilter? = null,
+    val completedDownloads: Int = 0,
+    val totalDownloads: Int = 0,
     val entries: Map<DownloadableFilter, FilterEntry> = emptyMap()
 ) {
     fun blocked(domain: String, enabled: Set<String>): Boolean = DownloadableFilter.entries.any {
@@ -104,8 +122,11 @@ class FilterRepository(
         withContext(Dispatchers.IO) {
             mutex.lock()
             try {
-                mutable.value = mutable.value.copy(updating = true)
-                DownloadableFilter.entries.filter { it.name in selected }.forEach { filter ->
+                val filters = DownloadableFilter.entries.filter { it.name in selected }
+                mutable.value = mutable.value.copy(updating = true, activeFilter = filters.firstOrNull(),
+                    completedDownloads = 0, totalDownloads = filters.size)
+                filters.forEachIndexed { index, filter ->
+                    mutable.value = mutable.value.copy(activeFilter = filter, completedDownloads = index)
                     val old = mutable.value.entries[filter] ?: FilterEntry()
                     val updated = try {
                         val bytes = fetch(filter.url)
@@ -118,25 +139,35 @@ class FilterRepository(
                             Files.move(temp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
                         } finally { temp.delete() }
                         FilterEntry(list, target.lastModified())
-                    } catch (_: Exception) {
-                        old.copy(error = if (old.list == null) "Download failed. Check your connection and try again."
-                            else "Update failed. Keeping the previous filter.")
+                    } catch (error: Exception) {
+                        old.copy(error = downloadErrorMessage(error, old.list != null))
                     }
-                    mutable.value = mutable.value.copy(entries = mutable.value.entries + (filter to updated))
+                    mutable.value = mutable.value.copy(entries = mutable.value.entries + (filter to updated),
+                        completedDownloads = index + 1)
                 }
             } finally {
-                mutable.value = mutable.value.copy(updating = false)
+                mutable.value = mutable.value.copy(updating = false, activeFilter = null)
                 mutex.unlock()
             }
         }
     }
 }
 
+private fun downloadErrorMessage(error: Exception, hasSavedCopy: Boolean): String {
+    val reason = when (error) {
+        is UnknownHostException -> "No internet connection or GitHub could not be reached."
+        is SocketTimeoutException -> "The connection was too slow and timed out."
+        is SSLException -> "A secure connection to GitHub could not be established."
+        else -> error.message?.takeIf { it.isNotBlank() }?.take(120) ?: "The download could not be completed."
+    }
+    return if (hasSavedCopy) "$reason The previous filter is still active." else "$reason Try again when the connection is stable."
+}
+
 private fun downloadFilter(address: String): ByteArray {
     val connection = URL(address).openConnection() as HttpsURLConnection
     try {
         connection.connectTimeout = 10_000
-        connection.readTimeout = 15_000
+        connection.readTimeout = 30_000
         connection.instanceFollowRedirects = false
         connection.setRequestProperty("Accept", "text/plain")
         check(connection.responseCode == 200) { "Filter server unavailable" }

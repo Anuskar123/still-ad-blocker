@@ -43,7 +43,7 @@ fun AboutScreen(onBack: () -> Unit) {
                 TextButton(onClick = { privacy = true }) { Text("Privacy policy") }
                 TextButton(onClick = { open("https://github.com/Anuskar123/still-ad-blocker") }) { Text("GitHub source") }
                 Text("Filter list credits", style = MaterialTheme.typography.titleMedium)
-                Text("Optional HaGeZi Multi LIGHT and TIF Mini lists are downloaded from HaGeZi's DNS blocklists repository. The project distributes these lists under GPL-3.0. Source and licence are available below.")
+                Text("Optional HaGeZi Multi Light, Pro Mini, Pro++ Mini, TIF Mini, fake-site, pop-up, gambling and adult-domain lists are downloaded from HaGeZi's DNS blocklists repository. The project distributes these lists under GPL-3.0. Source and licence are available below.")
                 TextButton(onClick = { open("https://github.com/hagezi/dns-blocklists") }) { Text("HaGeZi filter lists and credits") }
                 TextButton(onClick = { open("https://github.com/hagezi/dns-blocklists/blob/main/LICENSE") }) { Text("Filter list licence") }
                 TextButton(onClick = { context.startActivity(Intent(context, OssLicensesMenuActivity::class.java)) }) { Text("Open source licences") }

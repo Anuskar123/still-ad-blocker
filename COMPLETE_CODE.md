@@ -24,8 +24,8 @@ android {
         applicationId = "dev.still.dns"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "2.0"
+        versionCode = 7
+        versionName = "2.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["appLabel"] = "Still"
     }
@@ -501,6 +501,7 @@ fun DashboardScreen(
                 }
                 BrowseCard(state.connected, onOpenPrivateBrowser, onOpenOtherBrowser)
                 FilterListsCard(filterLibrary, preferences, onSettingsChange, onUpdateFilters)
+                DomainCheckCard(preferences, filterLibrary)
                 HorizontalDivider(color = colors.outlineVariant)
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Icon(Icons.Outlined.Lock, null, tint = colors.onSurfaceVariant, modifier = Modifier.size(18.dp))
@@ -1597,7 +1598,8 @@ package dev.still.dns
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
@@ -1612,12 +1614,20 @@ import java.util.Date
 fun FilterListsCard(library: FilterLibraryState, preferences: AppSettings,
     onChange: (AppSettings) -> Unit, onUpdate: () -> Unit) {
     val uriHandler = LocalUriHandler.current
+    var search by rememberSaveable { mutableStateOf("") }
     OutlinedCard {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Filter lists", style = MaterialTheme.typography.titleMedium)
+            Text("Choose one Multi list, then optional extra categories. Selecting a Multi list replaces the previous Multi selection.", style = MaterialTheme.typography.bodySmall)
+            val selected = DownloadableFilter.entries.filter { it.name in preferences.enabledSubscriptions }
+            val ready = selected.count { library.entries[it]?.list != null }
+            Text("${selected.size} selected / $ready downloaded", style = MaterialTheme.typography.labelLarge)
+            OutlinedTextField(value = search, onValueChange = { search = it.take(80) }, label = { Text("Find a filter list") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Text("Add maintained domain lists to your protection level. Selected lists update daily when automatic updates are enabled in Settings. You can also download them now. Saved lists work offline.", style = MaterialTheme.typography.bodySmall)
             if (!library.ready) LinearProgressIndicator(Modifier.fillMaxWidth())
-            DownloadableFilter.entries.forEach { filter ->
+            val visible = DownloadableFilter.entries.filter { it.title.contains(search, true) || it.detail.contains(search, true) }
+            if (visible.isEmpty()) Text("No matching lists.")
+            visible.forEach { filter ->
                 val enabled = filter.name in preferences.enabledSubscriptions
                 val entry = library.entries[filter]
                 HorizontalDivider()
@@ -1625,8 +1635,7 @@ fun FilterListsCard(library: FilterLibraryState, preferences: AppSettings,
                     Text(filter.title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
                     Switch(checked = enabled, enabled = library.ready,
                         onCheckedChange = { selected ->
-                            onChange(preferences.copy(enabledSubscriptions = if (selected)
-                                preferences.enabledSubscriptions + filter.name else preferences.enabledSubscriptions - filter.name))
+                            onChange(preferences.copy(enabledSubscriptions = filter.select(preferences.enabledSubscriptions, selected)))
                         }, modifier = Modifier.semantics { contentDescription = "Enable ${filter.title} filter list" })
                 }
                 Text(filter.detail, style = MaterialTheme.typography.bodySmall)
@@ -1644,9 +1653,19 @@ fun FilterListsCard(library: FilterLibraryState, preferences: AppSettings,
             }
             Button(onClick = onUpdate, enabled = library.ready && !library.updating && preferences.enabledSubscriptions.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth()) {
-                Text(if (library.updating) "Updating filters..." else "Download / update selected lists")
+                Text(if (library.updating) {
+                    val position = (library.completedDownloads + 1).coerceAtMost(library.totalDownloads)
+                    "Downloading $position of ${library.totalDownloads}: ${library.activeFilter?.title.orEmpty()}"
+                } else "Download / update selected lists")
             }
-            if (library.updating) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (library.updating) {
+                LinearProgressIndicator(
+                    progress = { if (library.totalDownloads == 0) 0f else library.completedDownloads.toFloat() / library.totalDownloads },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text("Large lists can take more than a minute on a mobile connection. Keep Still open until this finishes.",
+                    style = MaterialTheme.typography.bodySmall)
+            }
             Text("Downloads connect to GitHub over HTTPS and use mobile data if Wi-Fi is unavailable. Still does not send your browsing history. Your allow rules take priority. A failed update keeps the last valid copy.", style = MaterialTheme.typography.bodySmall)
             Text("Still is independent of AdGuard and HaGeZi. These lists cannot remove page elements or reliably block YouTube video ads.", style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = { uriHandler.openUri("https://github.com/hagezi/dns-blocklists") }) { Text("List source and credits") }
@@ -1699,6 +1718,18 @@ object FilterPolicy {
         require(!domain.all { it.isDigit() || it == '.' })
         domain
     }.getOrNull()
+
+    /** Uses the same precedence as live filtering; performs no network lookup. */
+    fun explain(domain: String, settings: AppSettings, library: FilterLibraryState): String {
+        if (PacketParser.blocked(domain, settings.allowedDomains)) return "Allowed by your allow rule. Allow rules override all blocklists."
+        if (PacketParser.blocked(domain, settings.blockedDomains)) return "Blocked by your custom block rule."
+        if (PacketParser.blocked(domain, rules(settings.protectionLevel))) return "Blocked by the built-in ${settings.protectionLevel.title} rules."
+        val matches = DownloadableFilter.entries.filter { it.name in settings.enabledSubscriptions && library.entries[it]?.list?.matches(domain) == true }
+        if (matches.isNotEmpty()) return "Blocked by: " + matches.joinToString { it.title }
+        val missing = DownloadableFilter.entries.any { it.name in settings.enabledSubscriptions && library.entries[it]?.list == null }
+        return if (missing) "No match in available rules. Some selected lists have not been downloaded."
+        else "No block rule matches. This does not establish that the site is safe."
+    }
 }
 ```
 
@@ -1709,10 +1740,13 @@ package dev.still.dns
 
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.net.URL
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -1720,11 +1754,23 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-enum class DownloadableFilter(val title: String, val detail: String, val fileName: String) {
-    AdsTrackers("Ads and trackers", "HaGeZi Multi LIGHT: a compact list for advertising and tracking domains.", "light.txt"),
-    Threats("Threat domains", "HaGeZi TIF Mini: domains listed for threats such as phishing and malware. Not a guarantee of safety.", "tif.mini.txt");
+enum class DownloadableFilter(val title: String, val detail: String, val fileName: String, val mainList: Boolean = false) {
+    AdsTrackers("Multi Light", "Relaxed ad and tracker filtering. Lowest risk of breaking sites.", "light.txt", true),
+    ProMini("Multi Pro Mini", "Compact, broader ad and tracker coverage. Some services may need allow rules.", "pro.mini.txt", true),
+    ProPlusMini("Multi Pro++ Mini", "More aggressive tracking protection. Higher risk of breaking app and website features.", "pro.plus.mini.txt", true),
+    Threats("Threat domains", "HaGeZi TIF Mini: phishing and malware domains. Not a guarantee of safety.", "tif.mini.txt"),
+    FakeSites("Fake and scam sites", "Domains associated with fake shops, scams and deceptive sites.", "fake.txt"),
+    Popups("Pop-up ad domains", "Blocks known pop-up advertising domains, not page elements or all pop-up windows.", "popupads.txt"),
+    Gambling("Gambling domains", "Gambling Mini: optionally restrict known gambling sites. Not comprehensive parental control.", "gambling.mini.txt"),
+    AdultContent("Adult domains", "Optionally restrict listed adult sites. May block legitimate content and can be bypassed.", "nsfw.txt");
 
     val url get() = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/$fileName"
+
+    fun select(enabled: Set<String>, selected: Boolean): Set<String> {
+        if (!selected) return enabled - name
+        val remaining = if (mainList) enabled - entries.filter { it.mainList }.map { it.name }.toSet() else enabled
+        return remaining + name
+    }
 }
 
 data class DomainList(val domains: Set<String>, val version: String) {
@@ -1774,6 +1820,9 @@ data class FilterEntry(val list: DomainList? = null, val downloadedAt: Long = 0,
 data class FilterLibraryState(
     val ready: Boolean = false,
     val updating: Boolean = false,
+    val activeFilter: DownloadableFilter? = null,
+    val completedDownloads: Int = 0,
+    val totalDownloads: Int = 0,
     val entries: Map<DownloadableFilter, FilterEntry> = emptyMap()
 ) {
     fun blocked(domain: String, enabled: Set<String>): Boolean = DownloadableFilter.entries.any {
@@ -1811,8 +1860,11 @@ class FilterRepository(
         withContext(Dispatchers.IO) {
             mutex.lock()
             try {
-                mutable.value = mutable.value.copy(updating = true)
-                DownloadableFilter.entries.filter { it.name in selected }.forEach { filter ->
+                val filters = DownloadableFilter.entries.filter { it.name in selected }
+                mutable.value = mutable.value.copy(updating = true, activeFilter = filters.firstOrNull(),
+                    completedDownloads = 0, totalDownloads = filters.size)
+                filters.forEachIndexed { index, filter ->
+                    mutable.value = mutable.value.copy(activeFilter = filter, completedDownloads = index)
                     val old = mutable.value.entries[filter] ?: FilterEntry()
                     val updated = try {
                         val bytes = fetch(filter.url)
@@ -1825,25 +1877,35 @@ class FilterRepository(
                             Files.move(temp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
                         } finally { temp.delete() }
                         FilterEntry(list, target.lastModified())
-                    } catch (_: Exception) {
-                        old.copy(error = if (old.list == null) "Download failed. Check your connection and try again."
-                            else "Update failed. Keeping the previous filter.")
+                    } catch (error: Exception) {
+                        old.copy(error = downloadErrorMessage(error, old.list != null))
                     }
-                    mutable.value = mutable.value.copy(entries = mutable.value.entries + (filter to updated))
+                    mutable.value = mutable.value.copy(entries = mutable.value.entries + (filter to updated),
+                        completedDownloads = index + 1)
                 }
             } finally {
-                mutable.value = mutable.value.copy(updating = false)
+                mutable.value = mutable.value.copy(updating = false, activeFilter = null)
                 mutex.unlock()
             }
         }
     }
 }
 
+private fun downloadErrorMessage(error: Exception, hasSavedCopy: Boolean): String {
+    val reason = when (error) {
+        is UnknownHostException -> "No internet connection or GitHub could not be reached."
+        is SocketTimeoutException -> "The connection was too slow and timed out."
+        is SSLException -> "A secure connection to GitHub could not be established."
+        else -> error.message?.takeIf { it.isNotBlank() }?.take(120) ?: "The download could not be completed."
+    }
+    return if (hasSavedCopy) "$reason The previous filter is still active." else "$reason Try again when the connection is stable."
+}
+
 private fun downloadFilter(address: String): ByteArray {
     val connection = URL(address).openConnection() as HttpsURLConnection
     try {
         connection.connectTimeout = 10_000
-        connection.readTimeout = 15_000
+        connection.readTimeout = 30_000
         connection.instanceFollowRedirects = false
         connection.setRequestProperty("Accept", "text/plain")
         check(connection.responseCode == 200) { "Filter server unavailable" }
@@ -3106,7 +3168,7 @@ fun AboutScreen(onBack: () -> Unit) {
                 TextButton(onClick = { privacy = true }) { Text("Privacy policy") }
                 TextButton(onClick = { open("https://github.com/Anuskar123/still-ad-blocker") }) { Text("GitHub source") }
                 Text("Filter list credits", style = MaterialTheme.typography.titleMedium)
-                Text("Optional HaGeZi Multi LIGHT and TIF Mini lists are downloaded from HaGeZi's DNS blocklists repository. The project distributes these lists under GPL-3.0. Source and licence are available below.")
+                Text("Optional HaGeZi Multi Light, Pro Mini, Pro++ Mini, TIF Mini, fake-site, pop-up, gambling and adult-domain lists are downloaded from HaGeZi's DNS blocklists repository. The project distributes these lists under GPL-3.0. Source and licence are available below.")
                 TextButton(onClick = { open("https://github.com/hagezi/dns-blocklists") }) { Text("HaGeZi filter lists and credits") }
                 TextButton(onClick = { open("https://github.com/hagezi/dns-blocklists/blob/main/LICENSE") }) { Text("Filter list licence") }
                 TextButton(onClick = { context.startActivity(Intent(context, OssLicensesMenuActivity::class.java)) }) { Text("Open source licences") }
@@ -3153,4 +3215,73 @@ Still is a general-purpose utility with a browser that can access the open web. 
 
 Changes
 This policy should be updated when app behavior or data practices change. Review the policy included with the app version you use.
+```
+
+## app/src/main/java/dev/still/dns/DomainCheckCard.kt
+
+```kotlin
+package dev.still.dns
+
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+
+@Composable
+fun DomainCheckCard(settings: AppSettings, library: FilterLibraryState) {
+    var input by rememberSaveable { mutableStateOf("") }
+    var checked by rememberSaveable { mutableStateOf<String?>(null) }
+    OutlinedCard {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Check a domain", style = MaterialTheme.typography.titleMedium)
+            Text("See how your current rules handle a domain. This check stays on your device and does not visit the site.", style = MaterialTheme.typography.bodySmall)
+            OutlinedTextField(value = input, onValueChange = { input = it.take(253); checked = null },
+                label = { Text("Domain, for example example.com") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            Button(onClick = { checked = input }, enabled = library.ready && input.isNotBlank()) { Text("Check rules") }
+            checked?.let { raw ->
+                val domain = FilterPolicy.normalizeDomain(raw)
+                Text(if (domain == null) "Enter a domain without a URL path, port or IP address."
+                    else "$domain: ${FilterPolicy.explain(domain, settings, library)}")
+            }
+            Text("Results describe saved rules. Device-wide filtering requires protection to be on; encrypted DNS may bypass it.", style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+```
+
+## app/src/test/java/dev/still/dns/FilterCatalogTest.kt
+
+```kotlin
+package dev.still.dns
+
+import org.junit.Assert.*
+import org.junit.Test
+
+class FilterCatalogTest {
+    @Test fun selectingMainTierReplacesPreviousTierAndPreservesExtras() {
+        val enabled = setOf("AdsTrackers", "Threats", "Gambling")
+        assertEquals(setOf("ProMini", "Threats", "Gambling"), DownloadableFilter.ProMini.select(enabled, true))
+        assertEquals(setOf("Threats", "Gambling"), DownloadableFilter.AdsTrackers.select(enabled, false))
+        assertEquals(enabled + "FakeSites", DownloadableFilter.FakeSites.select(enabled, true))
+    }
+
+    @Test fun checkerHonorsAllowPrecedenceAndShowsMatchingSubscription() {
+        val library = FilterLibraryState(ready = true, entries = mapOf(
+            DownloadableFilter.FakeSites to FilterEntry(DomainList(setOf("example.com"), "test"))))
+        val settings = AppSettings(enabledSubscriptions = setOf("FakeSites"))
+        assertEquals("Blocked by: Fake and scam sites", FilterPolicy.explain("sub.example.com", settings, library))
+        assertTrue(FilterPolicy.explain("sub.example.com", settings.copy(allowedDomains = setOf("example.com")), library).startsWith("Allowed"))
+        assertTrue(FilterPolicy.explain("notexample.com", settings, library).startsWith("No block rule"))
+        assertTrue(FilterPolicy.blocked("sub.example.com", settings, library))
+        assertFalse(FilterPolicy.blocked("sub.example.com", settings.copy(enabledSubscriptions = emptySet()), library))
+    }
+
+    @Test fun checkerDistinguishesMissingDownloadsFromNoMatch() {
+        assertTrue(FilterPolicy.explain("example.com", AppSettings(enabledSubscriptions = setOf("Threats")), FilterLibraryState()).contains("not been downloaded"))
+        assertTrue(FilterPolicy.explain("example.com", AppSettings(blockedDomains = setOf("example.com")), FilterLibraryState()).contains("custom block"))
+        assertTrue(FilterPolicy.explain("ads.google.com", AppSettings(), FilterLibraryState()).contains("built-in Basic"))
+    }
+}
 ```
